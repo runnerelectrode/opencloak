@@ -112,6 +112,13 @@ export class DiscordProvider extends BaseProvider {
   }
 
   matchesResource(resourceUri) {
+    try {
+      const targetOrigin = new URL(DISCORD_RESOURCE).origin;
+      const requestOrigin = new URL(resourceUri).origin;
+      if (targetOrigin !== requestOrigin) return false;
+    } catch {
+      return false;
+    }
     return (
       resourceUri === DISCORD_RESOURCE ||
       resourceUri.startsWith(DISCORD_RESOURCE + "/")

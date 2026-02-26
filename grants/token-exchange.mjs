@@ -37,21 +37,14 @@ export async function handleTokenExchange(params, adapter) {
   try {
     identity = await verifyActorToken(actor_token, actor_token_type);
   } catch (err) {
-    return error(
-      401,
-      "invalid_grant",
-      `actor_token verification failed: ${err.message}`
-    );
+    console.error("Actor token verification failed:", err.message);
+    return error(401, "invalid_grant", "actor_token verification failed");
   }
 
   // --- 2. Look up agent by Tailscale identity ---
   const agent = await findAgentByIdentity(adapter, identity.sub);
   if (!agent) {
-    return error(
-      403,
-      "invalid_grant",
-      `no agent registered for identity '${identity.sub}'`
-    );
+    return error(403, "invalid_grant", "agent not authorized");
   }
 
   // --- 3. Resolve provider from resource URI ---
@@ -72,7 +65,7 @@ export async function handleTokenExchange(params, adapter) {
     return error(
       400,
       "invalid_target",
-      `no provider configured for resource '${resource}'`
+      "no provider configured for the requested resource"
     );
   }
 
@@ -126,11 +119,8 @@ export async function handleTokenExchange(params, adapter) {
   try {
     tokenData = await providerInstance.refreshToken(account.refresh_token);
   } catch (err) {
-    return error(
-      502,
-      "invalid_grant",
-      `provider token refresh failed: ${err.message}`
-    );
+    console.error("Provider token refresh failed:", err.message);
+    return error(502, "invalid_grant", "provider token refresh failed");
   }
 
   // --- 7. Persist new tokens atomically ---
@@ -138,23 +128,28 @@ export async function handleTokenExchange(params, adapter) {
     ? new Date(Date.now() + tokenData.expires_in * 1000).toISOString()
     : null;
 
-  if (
-    tokenData.refresh_token &&
-    tokenData.refresh_token !== account.refresh_token
-  ) {
-    await adapter.rotateRefreshToken(
-      account.id,
-      account.refresh_token,
-      tokenData.refresh_token,
-      tokenData.access_token,
-      expiresAt
-    );
-  } else {
-    await adapter.updateAccessToken(
-      account.id,
-      tokenData.access_token,
-      expiresAt
-    );
+  try {
+    if (
+      tokenData.refresh_token &&
+      tokenData.refresh_token !== account.refresh_token
+    ) {
+      await adapter.rotateRefreshToken(
+        account.id,
+        account.refresh_token,
+        tokenData.refresh_token,
+        tokenData.access_token,
+        expiresAt
+      );
+    } else {
+      await adapter.updateAccessToken(
+        account.id,
+        tokenData.access_token,
+        expiresAt
+      );
+    }
+  } catch (err) {
+    console.error("Token persistence failed:", err.message);
+    // Still return the token — it's valid even if persistence failed
   }
 
   // --- 8. Return RFC 8693 response ---

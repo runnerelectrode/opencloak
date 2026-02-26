@@ -70,6 +70,14 @@ async function addProvider(opts) {
       console.error("Generic providers require --authorize-url and --token-url");
       process.exit(1);
     }
+    // Validate URLs are HTTPS
+    for (const urlOpt of ["authorize-url", "token-url", "revoke-url"]) {
+      const val = opts[urlOpt];
+      if (val && !val.startsWith("https://")) {
+        console.error(`--${urlOpt} must use HTTPS`);
+        process.exit(1);
+      }
+    }
     providerData.authorize_url = opts["authorize-url"];
     providerData.token_url = opts["token-url"];
     providerData.revoke_url = opts["revoke-url"] || null;
@@ -250,7 +258,12 @@ async function exchange(opts) {
       body,
     });
     const data = await res.json();
-    console.log(JSON.stringify(data, null, 2));
+    // Redact sensitive tokens in CLI output
+    const display = { ...data };
+    if (display.access_token) {
+      display.access_token = display.access_token.slice(0, 8) + "...REDACTED";
+    }
+    console.log(JSON.stringify(display, null, 2));
   } catch (err) {
     console.error(`Exchange request failed: ${err.message}`);
     console.error("Make sure the vault server is running (opencloak start)");

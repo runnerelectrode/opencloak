@@ -12,6 +12,20 @@ import { BaseProvider } from "./base.mjs";
  * }
  */
 export class GenericOAuthProvider extends BaseProvider {
+  constructor(config) {
+    super(config);
+    // Validate endpoint URLs at construction time
+    if (config.token_url) {
+      validateEndpointUrl(config.token_url, "token_url");
+    }
+    if (config.authorize_url) {
+      validateEndpointUrl(config.authorize_url, "authorize_url");
+    }
+    if (config.revoke_url) {
+      validateEndpointUrl(config.revoke_url, "revoke_url");
+    }
+  }
+
   get id() {
     return this.config.provider_id || "generic";
   }
@@ -91,9 +105,30 @@ export class GenericOAuthProvider extends BaseProvider {
   }
 
   matchesResource(resourceUri) {
+    if (!this.config.resource_uri) return false;
+    // Use origin-based comparison to prevent prefix collisions
+    try {
+      const targetOrigin = new URL(this.config.resource_uri).origin;
+      const requestOrigin = new URL(resourceUri).origin;
+      if (targetOrigin !== requestOrigin) return false;
+    } catch {
+      return false;
+    }
     return (
       resourceUri === this.config.resource_uri ||
       resourceUri.startsWith(this.config.resource_uri + "/")
     );
+  }
+}
+
+function validateEndpointUrl(urlStr, name) {
+  try {
+    const parsed = new URL(urlStr);
+    if (parsed.protocol !== "https:") {
+      throw new Error(`${name} must use HTTPS: ${urlStr}`);
+    }
+  } catch (err) {
+    if (err.message.includes("must use HTTPS")) throw err;
+    throw new Error(`${name} is not a valid URL: ${urlStr}`);
   }
 }

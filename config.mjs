@@ -8,7 +8,8 @@ let _adapter = null;
  */
 export function getAdapter(root) {
   if (!_adapter) {
-    _adapter = new JsonFileAdapter(root);
+    const encryptionKey = process.env.OPENCLOAK_ENCRYPTION_KEY || null;
+    _adapter = new JsonFileAdapter(root, encryptionKey);
   }
   return _adapter;
 }

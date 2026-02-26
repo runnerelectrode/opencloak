@@ -51,14 +51,58 @@ async function generateJwks(adapter) {
   return data;
 }
 
+// --- Security constants ---
+const MAX_BODY_BYTES = 64 * 1024; // 64 KB
+const BODY_TIMEOUT_MS = 10000;
+const SESSION_MAX_AGE_MS = 10 * 60 * 1000; // 10 minutes
+const SESSION_CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+
+// --- Rate limiter (sliding window per IP) ---
+const RATE_LIMIT_WINDOW_MS = 60 * 1000;
+const RATE_LIMIT_MAX = 60; // 60 requests per minute per IP
+const rateLimitMap = new Map();
+
+function checkRateLimit(ip) {
+  const now = Date.now();
+  let entry = rateLimitMap.get(ip);
+  if (!entry || now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
+    entry = { windowStart: now, count: 0 };
+    rateLimitMap.set(ip, entry);
+  }
+  entry.count++;
+  // Evict stale entries periodically
+  if (rateLimitMap.size > 10000) {
+    for (const [k, v] of rateLimitMap) {
+      if (now - v.windowStart > RATE_LIMIT_WINDOW_MS) rateLimitMap.delete(k);
+    }
+  }
+  return entry.count <= RATE_LIMIT_MAX;
+}
+
 /**
- * Parse URL-encoded body from an http.IncomingMessage.
+ * Parse URL-encoded body with size limit and timeout.
  */
 function parseBody(req) {
   return new Promise((resolve, reject) => {
+    let size = 0;
     const chunks = [];
-    req.on("data", (c) => chunks.push(c));
+    const timeout = setTimeout(() => {
+      req.destroy();
+      reject(new Error("body read timeout"));
+    }, BODY_TIMEOUT_MS);
+
+    req.on("data", (c) => {
+      size += c.length;
+      if (size > MAX_BODY_BYTES) {
+        clearTimeout(timeout);
+        req.destroy();
+        reject(new Error("body too large"));
+        return;
+      }
+      chunks.push(c);
+    });
     req.on("end", () => {
+      clearTimeout(timeout);
       try {
         const raw = Buffer.concat(chunks).toString("utf-8");
         resolve(Object.fromEntries(new URLSearchParams(raw)));
@@ -66,12 +110,25 @@ function parseBody(req) {
         reject(e);
       }
     });
-    req.on("error", reject);
+    req.on("error", (e) => {
+      clearTimeout(timeout);
+      reject(e);
+    });
   });
 }
 
 /**
- * Send a JSON response.
+ * Security headers applied to every response.
+ */
+const SECURITY_HEADERS = {
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "DENY",
+  "Content-Security-Policy": "default-src 'none'",
+  "Referrer-Policy": "no-referrer",
+};
+
+/**
+ * Send a JSON response with security headers.
  */
 function json(res, status, body) {
   const payload = JSON.stringify(body);
@@ -79,9 +136,14 @@ function json(res, status, body) {
     "Content-Type": "application/json",
     "Content-Length": Buffer.byteLength(payload),
     "Cache-Control": "no-store",
+    "Pragma": "no-cache",
+    ...SECURITY_HEADERS,
   });
   res.end(payload);
 }
+
+// Valid provider name: alphanumeric + hyphens only
+const VALID_PROVIDER_NAME = /^[a-z0-9-]+$/;
 
 /**
  * Start the vault server.
@@ -92,13 +154,33 @@ export async function startServer(options = {}) {
   const adapter = getAdapter(options.dataDir);
   const jwksData = await generateJwks(adapter);
 
+  // Periodic session cleanup
+  const cleanupInterval = setInterval(async () => {
+    try {
+      await adapter.cleanExpiredSessions(SESSION_MAX_AGE_MS);
+    } catch {
+      // non-fatal
+    }
+  }, SESSION_CLEANUP_INTERVAL_MS);
+  cleanupInterval.unref();
+
   const server = http.createServer(async (req, res) => {
+    const clientIp = req.socket.remoteAddress || "unknown";
+
+    // Rate limit on token endpoint
+    if (req.url?.startsWith("/token") && !checkRateLimit(clientIp)) {
+      return json(res, 429, {
+        error: "too_many_requests",
+        error_description: "rate limit exceeded, try again later",
+      });
+    }
+
     const url = new URL(req.url, issuer);
-    const path = url.pathname;
+    const pathname = url.pathname;
 
     try {
       // --- POST /token — RFC 8693 Token Exchange ---
-      if (path === "/token" && req.method === "POST") {
+      if (pathname === "/token" && req.method === "POST") {
         const body = await parseBody(req);
 
         if (
@@ -117,34 +199,64 @@ export async function startServer(options = {}) {
       }
 
       // --- GET /oauth/callback/:provider ---
-      if (path.startsWith("/oauth/callback/") && req.method === "GET") {
-        const providerName = path.split("/oauth/callback/")[1];
-        if (!providerName) {
-          return json(res, 400, { error: "missing provider name" });
+      if (pathname.startsWith("/oauth/callback/") && req.method === "GET") {
+        const providerName = decodeURIComponent(
+          pathname.split("/oauth/callback/")[1] || ""
+        );
+
+        // Validate provider name (Finding 13)
+        if (
+          !providerName ||
+          !VALID_PROVIDER_NAME.test(providerName) ||
+          providerName.includes("..")
+        ) {
+          return json(res, 400, {
+            error: "invalid_request",
+            error_description: "invalid provider name",
+          });
         }
 
         const code = url.searchParams.get("code");
         const state = url.searchParams.get("state");
-        const error = url.searchParams.get("error");
+        const callbackError = url.searchParams.get("error");
 
-        if (error) {
+        if (callbackError) {
           return json(res, 400, {
             error: "provider_denied",
-            error_description:
-              url.searchParams.get("error_description") || error,
+            error_description: "authorization was denied by the provider",
           });
         }
 
         if (!code || !state) {
           return json(res, 400, {
-            error: "missing code or state parameter",
+            error: "invalid_request",
+            error_description: "missing code or state parameter",
+          });
+        }
+
+        // Validate state format (hex, 32 chars)
+        if (!/^[a-f0-9]{32}$/.test(state)) {
+          return json(res, 400, {
+            error: "invalid_request",
+            error_description: "malformed state parameter",
           });
         }
 
         const session = await adapter.find("sessions", state);
         if (!session) {
           return json(res, 400, {
-            error: "invalid or expired state parameter",
+            error: "invalid_request",
+            error_description: "invalid or expired state parameter",
+          });
+        }
+
+        // Check session expiry (Finding 8)
+        const sessionAge = Date.now() - new Date(session.created_at).getTime();
+        if (sessionAge > SESSION_MAX_AGE_MS) {
+          await adapter.destroy("sessions", state);
+          return json(res, 400, {
+            error: "invalid_request",
+            error_description: "state parameter expired",
           });
         }
 
@@ -153,11 +265,15 @@ export async function startServer(options = {}) {
           session.provider_id
         );
         if (!providerConfig) {
-          return json(res, 500, { error: "provider config not found" });
+          return json(res, 500, {
+            error: "server_error",
+            error_description: "an internal error occurred",
+          });
         }
 
         const providerInstance = getProviderInstance(providerConfig);
-        const redirectUri = `${issuer}/oauth/callback/${providerName}`;
+        // Use session's provider_id for redirect URI, not the URL path
+        const redirectUri = `${issuer}/oauth/callback/${session.provider_id}`;
 
         try {
           const tokenData = await providerInstance.exchangeCode(
@@ -197,25 +313,26 @@ export async function startServer(options = {}) {
           return json(res, 200, {
             message: "Account connected successfully",
             account_id: accountId,
-            provider: providerName,
+            provider: session.provider_id,
             scopes: tokenData.scope || session.scopes,
           });
         } catch (err) {
+          console.error("OAuth callback error:", err);
           return json(res, 500, {
-            error: "token_exchange_failed",
-            error_description: err.message,
+            error: "server_error",
+            error_description: "failed to complete OAuth flow",
           });
         }
       }
 
       // --- GET /health ---
-      if (path === "/health" && req.method === "GET") {
+      if (pathname === "/health" && req.method === "GET") {
         return json(res, 200, { status: "ok", version: "0.1.0" });
       }
 
       // --- GET /.well-known/openid-configuration ---
       if (
-        path === "/.well-known/openid-configuration" &&
+        pathname === "/.well-known/openid-configuration" &&
         req.method === "GET"
       ) {
         return json(res, 200, {
@@ -233,9 +350,9 @@ export async function startServer(options = {}) {
       }
 
       // --- GET /jwks ---
-      if (path === "/jwks" && req.method === "GET") {
-        // Return only public keys
-        const pubKeys = jwksData.publicKeys || jwksData.keys.map(stripPrivate);
+      if (pathname === "/jwks" && req.method === "GET") {
+        // Always derive public keys at runtime — never trust stored publicKeys
+        const pubKeys = jwksData.keys.map(stripPrivate);
         return json(res, 200, { keys: pubKeys });
       }
 
@@ -243,9 +360,10 @@ export async function startServer(options = {}) {
       json(res, 404, { error: "not_found" });
     } catch (err) {
       console.error("Unhandled error:", err);
+      // Never leak internal error details to clients (Finding 10)
       json(res, 500, {
         error: "server_error",
-        error_description: err.message,
+        error_description: "an internal error occurred",
       });
     }
   });
@@ -263,7 +381,7 @@ export async function startServer(options = {}) {
  * Strip private key fields from a JWK (return public-only).
  */
 function stripPrivate(jwk) {
-  const { d, p, q, dp, dq, qi, ...pub } = jwk;
+  const { d, p, q, dp, dq, qi, k, ...pub } = jwk;
   return pub;
 }
 
