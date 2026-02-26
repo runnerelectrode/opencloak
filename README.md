@@ -1,8 +1,8 @@
 # OpenCloak
 
-Open-source OAuth vault for AI agents. RFC 8693 token exchange via Tailscale identity.
+Open-source OAuth vault for AI agents. Built for [OpenClaw](https://github.com/runnerelectrode/openclaw). RFC 8693 token exchange via Tailscale identity.
 
-Agents on your tailnet prove who they are with a Tailscale tsidp OIDC token. OpenCloak checks policy and returns a scoped, short-lived access token for third-party APIs (Discord, GitHub, Google, Slack). Agents never see or store long-lived credentials.
+OpenClaw (or any AI agent on your tailnet) proves who it is with a Tailscale tsidp OIDC token. OpenCloak checks policy and returns a scoped, short-lived access token for third-party APIs (Discord, GitHub, Google, Slack). Your agent never sees or stores long-lived credentials.
 
 **Zero external dependencies.** Pure Node.js 18+.
 
@@ -207,7 +207,7 @@ curl -X POST http://localhost:3422/token \
 # Post a message via the returned webhook URL
 curl -X POST <webhook_url> \
   -H "Content-Type: application/json" \
-  -d '{"content": "Hello from an AI agent via OpenCloak!"}'
+  -d '{"content": "Hello from OpenClaw via OpenCloak!"}'
 ```
 
 ## Deployment
@@ -216,7 +216,7 @@ OpenCloak should only be accessible within your tailnet — never exposed to the
 
 ### Option A: VPS (Digital Ocean, Hetzner, etc.)
 
-Your VPS joins the tailnet and runs OpenCloak. Other tailnet nodes (your AI agents) connect to it via its tailnet hostname.
+Your VPS joins the tailnet and runs OpenCloak. OpenClaw and other agents on your tailnet connect to it via its tailnet hostname.
 
 **1. Install Tailscale on the VPS:**
 
@@ -431,8 +431,8 @@ OPENCLOAK_TRUSTED_ISSUERS=http://localhost:4443 node cli.mjs start --port 3422
 
 ```
 ┌──────────────┐     1      ┌──────────────┐     3      ┌──────────────┐
-│   AI Agent   │ ──────────>│  OpenCloak   │ ──────────>│   Discord    │
-│  (your bot)  │ <──────────│  (the vault) │ <──────────│     API      │
+│   OpenClaw   │ ──────────>│  OpenCloak   │ ──────────>│   Discord    │
+│  (AI agent)  │ <──────────│  (the vault) │ <──────────│     API      │
 └──────────────┘     2      └──────────────┘     4      └──────────────┘
        │                          ▲
        │                          │
@@ -446,16 +446,16 @@ OPENCLOAK_TRUSTED_ISSUERS=http://localhost:4443 node cli.mjs start --port 3422
 └──────────────┘
 ```
 
-OpenCloak is the gateway/vault — it sits in the middle. The "agent" is whatever AI bot or service wants to talk to Discord (or any OAuth provider). In production, this is your actual AI bot running on your Tailscale network.
+OpenCloak is the gateway/vault — it sits in the middle. The "agent" is OpenClaw (or any AI bot/service that wants to talk to Discord or other OAuth providers). In production, OpenClaw runs on your Tailscale network and talks to OpenCloak to get scoped API access.
 
 ### What happens step by step
 
 | Step | Who | Does what |
 |------|-----|-----------|
-| 1 | Agent -> tsidp | "Prove I'm on this Tailscale network" |
-| 2 | Agent -> OpenCloak | "Here's my identity proof, give me Discord access" (`POST /token`, RFC 8693) |
+| 1 | OpenClaw -> tsidp | "Prove I'm on this Tailscale network" |
+| 2 | OpenClaw -> OpenCloak | "Here's my identity proof, give me Discord access" (`POST /token`, RFC 8693) |
 | 3 | OpenCloak internally | Verifies identity, checks policy, fetches scoped token |
-| 4 | Agent -> Discord | Uses the scoped token OpenCloak returned |
+| 4 | OpenClaw -> Discord | Uses the scoped token OpenCloak returned |
 
 OpenCloak is the gateway that:
 - Verifies the agent's Tailscale identity
@@ -464,7 +464,7 @@ OpenCloak is the gateway that:
 
 The agent never sees your Discord OAuth credentials. It only gets back what OpenCloak's policy allows.
 
-### In production, your AI bot's code would look like:
+### In production, OpenClaw's code would look like:
 
 ```javascript
 // 1. Get my Tailscale identity token
@@ -487,7 +487,7 @@ const { webhook_url } = await response.json();
 await fetch(webhook_url, {
   method: "POST",
   headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ content: "Hello from my AI agent!" })
+  body: JSON.stringify({ content: "Hello from OpenClaw via OpenCloak!" })
 });
 ```
 
