@@ -1,6 +1,11 @@
-# OpenCloak
+<p align="center">
+  <img src="logo.png" alt="OpenCloak" width="600">
+</p>
 
-Open-source OAuth vault for AI agents. Built for [OpenClaw](https://github.com/runnerelectrode/openclaw). RFC 8693 token exchange via Tailscale identity.
+<p align="center">
+  Open-source OAuth vault for AI agents. Built for <a href="https://github.com/runnerelectrode/openclaw">OpenClaw</a>.<br>
+  RFC 8693 token exchange via Tailscale identity.
+</p>
 
 OpenClaw (or any AI agent on your tailnet) proves who it is with a Tailscale tsidp OIDC token. OpenCloak checks policy and returns a scoped, short-lived access token for third-party APIs (Discord, GitHub, Google, Slack). Your agent never sees or stores long-lived credentials.
 
