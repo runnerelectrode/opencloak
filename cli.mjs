@@ -4,8 +4,6 @@ import { getAdapter, genId, DEFAULTS } from "./config.mjs";
 import { startServer, getProviderInstance } from "./server.mjs";
 import crypto from "node:crypto";
 
-const adapter = getAdapter(process.env.OPENCLOAK_DATA_DIR || undefined);
-
 const COMMANDS = {
   start,
   "add-provider": addProvider,
@@ -16,6 +14,8 @@ const COMMANDS = {
   "register-agent": registerAgent,
   help,
 };
+
+let adapter;
 
 async function main() {
   const [cmd, ...args] = process.argv.slice(2);
@@ -28,7 +28,13 @@ async function main() {
     process.exit(1);
   }
 
-  await handler(parseArgs(args));
+  const opts = parseArgs(args);
+
+  // Resolve data directory: --data-dir flag > OPENCLOAK_DATA_DIR env > default
+  const dataDir = opts["data-dir"] || process.env.OPENCLOAK_DATA_DIR || undefined;
+  adapter = getAdapter(dataDir);
+
+  await handler(opts);
 }
 
 // --- Command handlers ---
@@ -36,7 +42,8 @@ async function main() {
 async function start(opts) {
   const port = parseInt(opts.port || DEFAULTS.port, 10);
   const issuer = opts.issuer || `http://localhost:${port}`;
-  await startServer({ port, issuer });
+  const dataDir = opts["data-dir"] || process.env.OPENCLOAK_DATA_DIR || undefined;
+  await startServer({ port, issuer, dataDir });
 }
 
 async function addProvider(opts) {
@@ -335,6 +342,10 @@ OpenCloak — OAuth vault for AI agents
 
 Usage: opencloak <command> [options]
 
+Global Options:
+  --data-dir <path>                                Data directory (default: ~/.config/opencloak)
+                                                   Also settable via OPENCLOAK_DATA_DIR env var
+
 Commands:
   start [--port 3422]                              Start the vault server
   add-provider <name> --client-id X --client-secret Y
@@ -347,11 +358,11 @@ Commands:
   help                                             Show this help
 
 Examples:
-  opencloak add-provider discord --client-id 123 --client-secret abc
+  opencloak start --data-dir ./local-data --port 3422
+  opencloak add-provider discord --client-id 123 --client-secret abc --data-dir ./local-data
   opencloak register-agent --ts-identity user@example.com
   opencloak policy set user@example.com discord --scopes "identify,guilds"
   opencloak connect discord --scopes "identify guilds"
-  opencloak start --port 3422
 `);
 }
 
