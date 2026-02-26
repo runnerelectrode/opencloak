@@ -4,7 +4,7 @@ import { getAdapter, genId, DEFAULTS } from "./config.mjs";
 import { startServer, getProviderInstance } from "./server.mjs";
 import crypto from "node:crypto";
 
-const adapter = getAdapter();
+const adapter = getAdapter(process.env.OPENCLOAK_DATA_DIR || undefined);
 
 const COMMANDS = {
   start,
