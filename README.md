@@ -9,16 +9,91 @@ Agents on your tailnet prove who they are with a Tailscale tsidp OIDC token. Ope
 ## Prerequisites
 
 - **Node.js 18+** installed
-- **Tailscale** installed with your node joined to a tailnet
-- **tsidp enabled** on your tailnet (for OIDC token issuance)
+- **Tailscale** installed with your node joined to a tailnet, MagicDNS and HTTPS enabled
+- **tsidp** running on your tailnet (see setup below)
 - A **Discord Developer Application** (or other OAuth provider) with client ID and secret
+
+## Setting Up tsidp (Tailscale Identity Provider)
+
+tsidp is Tailscale's OIDC identity provider that issues tokens based on your tailnet identity. OpenCloak uses these tokens to verify which agent is making a request.
+
+### Option A: Docker (recommended)
+
+Create a `compose.yaml`:
+
+```yaml
+services:
+  tsidp:
+    container_name: tsidp
+    image: ghcr.io/tailscale/tsidp:latest
+    volumes:
+      - tsidp-data:/data
+    environment:
+      - TAILSCALE_USE_WIP_CODE=1
+      - TS_STATE_DIR=/data
+      - TS_HOSTNAME=idp
+      - TS_AUTHKEY=tskey-auth-xxxxx  # from Tailscale admin console
+volumes:
+  tsidp-data:
+```
+
+```bash
+docker compose up -d
+```
+
+### Option B: From source (requires Go)
+
+```bash
+git clone https://github.com/tailscale/tsidp.git
+cd tsidp
+TAILSCALE_USE_WIP_CODE=1 go run . -hostname idp -dir ./data
+```
+
+### Configure access grants
+
+In the Tailscale admin console (Access Controls), add a grant so your nodes can get tokens from tsidp:
+
+```json
+"grants": [
+  {
+    "src": ["*"],
+    "dst": ["tag:idp"],
+    "app": {
+      "tailscale.com/cap/tsidp": [
+        {
+          "allow_admin_ui": true,
+          "allow_dcr": true,
+          "users": ["*"],
+          "resources": ["*"]
+        }
+      ]
+    }
+  }
+]
+```
+
+### Verify tsidp is running
+
+Once started, tsidp is available at `https://idp.<your-tailnet>.ts.net`. Verify with:
+
+```bash
+curl https://idp.<your-tailnet>.ts.net/.well-known/openid-configuration
+```
+
+You should see an OIDC discovery document with `issuer`, `token_endpoint`, `jwks_uri`, etc.
+
+### Getting a token from tsidp
+
+Agents obtain OIDC tokens by authenticating through tsidp's standard OIDC flow. The token's `sub` claim contains the Tailscale identity (user email or device tag) — this is what OpenCloak uses to identify the agent.
+
+The issuer will be `https://idp.<your-tailnet>.ts.net`, which matches OpenCloak's trusted issuer pattern (`*.ts.net`).
 
 ## Step-by-Step Setup
 
 ### Step 1: Clone and install
 
 ```bash
-git clone https://github.com/<your-user>/opencloak.git
+git clone https://github.com/runnerelectrode/opencloak.git
 cd opencloak
 npm install
 ```
