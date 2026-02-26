@@ -210,25 +210,184 @@ curl -X POST <webhook_url> \
   -d '{"content": "Hello from an AI agent via OpenCloak!"}'
 ```
 
-## Tailnet Deployment
+## Deployment
 
-Expose the vault only within your tailnet (never on the public internet):
+OpenCloak should only be accessible within your tailnet — never exposed to the public internet. Below are guides for common setups.
+
+### Option A: VPS (Digital Ocean, Hetzner, etc.)
+
+Your VPS joins the tailnet and runs OpenCloak. Other tailnet nodes (your AI agents) connect to it via its tailnet hostname.
+
+**1. Install Tailscale on the VPS:**
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up --hostname opencloak
+```
+
+**2. Clone and run OpenCloak:**
+
+```bash
+git clone https://github.com/runnerelectrode/opencloak.git
+cd opencloak
+node cli.mjs start --data-dir /opt/opencloak/data --port 3422
+```
+
+**3. Expose via Tailscale HTTPS (TLS handled automatically):**
 
 ```bash
 tailscale serve https / http://localhost:3422
 ```
 
-Update your provider's redirect URI to use the tailnet hostname:
+Your vault is now available at `https://opencloak.<your-tailnet>.ts.net` — only to devices on your tailnet.
+
+**4. Set your OAuth redirect URI to the tailnet hostname:**
+
 ```
-https://<your-node>.<tailnet>.ts.net/oauth/callback/discord
+https://opencloak.<your-tailnet>.ts.net/oauth/callback/discord
 ```
 
-## Docker
+**5. Run as a systemd service (so it survives reboots):**
+
+```bash
+sudo tee /etc/systemd/system/opencloak.service > /dev/null <<'EOF'
+[Unit]
+Description=OpenCloak OAuth Vault
+After=network.target tailscaled.service
+
+[Service]
+Type=simple
+User=opencloak
+WorkingDirectory=/opt/opencloak
+ExecStart=/usr/bin/node cli.mjs start --data-dir /opt/opencloak/data --port 3422
+Restart=always
+RestartSec=5
+Environment=OPENCLOAK_ENCRYPTION_KEY=<your-encryption-key>
+Environment=OPENCLOAK_TRUSTED_ISSUERS=https://idp.<your-tailnet>.ts.net
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now opencloak
+```
+
+**6. Using Docker on the VPS:**
 
 ```bash
 docker build -t opencloak .
-docker run -p 3422:3422 -v opencloak-data:/data opencloak
+docker run -d \
+  --name opencloak \
+  --restart unless-stopped \
+  -p 127.0.0.1:3422:3422 \
+  -v opencloak-data:/data \
+  -e OPENCLOAK_ENCRYPTION_KEY=<your-encryption-key> \
+  -e OPENCLOAK_TRUSTED_ISSUERS=https://idp.<your-tailnet>.ts.net \
+  opencloak
 ```
+
+Note: bind to `127.0.0.1` so it's only accessible via Tailscale, not the public IP.
+
+### Option B: Mac Mini (home server)
+
+Your Mac Mini joins the tailnet and runs OpenCloak directly. Good for home labs or small teams.
+
+**1. Install Tailscale:**
+
+Download from https://tailscale.com/download/mac or:
+
+```bash
+brew install tailscale
+```
+
+Make sure your Mac Mini is connected to your tailnet with MagicDNS enabled.
+
+**2. Clone and run OpenCloak:**
+
+```bash
+git clone https://github.com/runnerelectrode/opencloak.git
+cd opencloak
+node cli.mjs start --port 3422
+```
+
+Data is stored in `~/.config/opencloak` by default.
+
+**3. Expose via Tailscale HTTPS:**
+
+```bash
+tailscale serve https / http://localhost:3422
+```
+
+Your vault is now at `https://<mac-mini-hostname>.<your-tailnet>.ts.net`.
+
+**4. Set your OAuth redirect URI:**
+
+```
+https://<mac-mini-hostname>.<your-tailnet>.ts.net/oauth/callback/discord
+```
+
+**5. Run on startup with launchd:**
+
+```bash
+mkdir -p ~/Library/LaunchAgents
+
+cat > ~/Library/LaunchAgents/com.opencloak.vault.plist <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.opencloak.vault</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/node</string>
+        <string>$(pwd)/cli.mjs</string>
+        <string>start</string>
+        <string>--port</string>
+        <string>3422</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>OPENCLOAK_ENCRYPTION_KEY</key>
+        <string>your-encryption-key</string>
+        <key>OPENCLOAK_TRUSTED_ISSUERS</key>
+        <string>https://idp.your-tailnet.ts.net</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/tmp/opencloak.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/opencloak.err</string>
+</dict>
+</plist>
+EOF
+
+launchctl load ~/Library/LaunchAgents/com.opencloak.vault.plist
+```
+
+### Option C: Local dev (no Tailscale)
+
+For testing without a tailnet, run tsidp locally and trust its issuer:
+
+```bash
+# Terminal 1: start tsidp locally
+TAILSCALE_USE_WIP_CODE=1 go run . -local-port 4443
+
+# Terminal 2: start OpenCloak, trusting the local tsidp
+OPENCLOAK_TRUSTED_ISSUERS=http://localhost:4443 node cli.mjs start --port 3422
+```
+
+### Environment variables
+
+| Variable | Description |
+|----------|-------------|
+| `OPENCLOAK_DATA_DIR` | Data directory path (default: `~/.config/opencloak`) |
+| `OPENCLOAK_ENCRYPTION_KEY` | AES-256 key for encrypting secrets at rest |
+| `OPENCLOAK_TRUSTED_ISSUERS` | Comma-separated trusted OIDC issuers (merged with defaults) |
 
 ## CLI Reference
 
