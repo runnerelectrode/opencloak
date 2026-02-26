@@ -243,28 +243,69 @@ docker run -p 3422:3422 -v opencloak-data:/data opencloak
 | `list` | Show all registered entities |
 | `help` | Show usage information |
 
-## How It Works
+## Architecture
 
 ```
-Agent (on tailnet)                    OpenCloak Vault                     Discord/GitHub/etc.
-      |                                     |                                    |
-      |-- POST /token ---------------------->|                                    |
-      |   (tsidp OIDC token + resource)     |                                    |
-      |                                     |-- Verify OIDC token (JWKS) ------->|
-      |                                     |-- Look up agent + policy            |
-      |                                     |-- Refresh provider token ---------->|
-      |                                     |<-- Fresh access token --------------|
-      |<-- Scoped access token -------------|                                    |
-      |                                                                          |
-      |-- GET /users/@me (Bearer token) ------------------------------------>|
-      |<-- User data --------------------------------------------------------|
+┌──────────────┐     1      ┌──────────────┐     3      ┌──────────────┐
+│   AI Agent   │ ──────────>│  OpenCloak   │ ──────────>│   Discord    │
+│  (your bot)  │ <──────────│  (the vault) │ <──────────│     API      │
+└──────────────┘     2      └──────────────┘     4      └──────────────┘
+       │                          ▲
+       │                          │
+       └──────────────────────────┘
+       │
+       ▼
+┌──────────────┐
+│    tsidp     │
+│  (identity   │
+│    proof)    │
+└──────────────┘
 ```
 
-1. **Agent authenticates** — presents Tailscale tsidp OIDC token (proves tailnet identity)
-2. **Vault verifies** — fetches OIDC discovery + JWKS from tsidp, verifies JWT signature
-3. **Policy check** — looks up agent, finds owner's connected account, intersects scopes with policy
-4. **Token refresh** — uses stored refresh token to get a fresh access token from the provider
-5. **Scoped return** — returns only the scopes the agent's policy allows
+OpenCloak is the gateway/vault — it sits in the middle. The "agent" is whatever AI bot or service wants to talk to Discord (or any OAuth provider). In production, this is your actual AI bot running on your Tailscale network.
+
+### What happens step by step
+
+| Step | Who | Does what |
+|------|-----|-----------|
+| 1 | Agent -> tsidp | "Prove I'm on this Tailscale network" |
+| 2 | Agent -> OpenCloak | "Here's my identity proof, give me Discord access" (`POST /token`, RFC 8693) |
+| 3 | OpenCloak internally | Verifies identity, checks policy, fetches scoped token |
+| 4 | Agent -> Discord | Uses the scoped token OpenCloak returned |
+
+OpenCloak is the gateway that:
+- Verifies the agent's Tailscale identity
+- Checks if the agent is **allowed** to access Discord (policy)
+- Returns only the **minimum access** needed (e.g., just a webhook, not full API)
+
+The agent never sees your Discord OAuth credentials. It only gets back what OpenCloak's policy allows.
+
+### In production, your AI bot's code would look like:
+
+```javascript
+// 1. Get my Tailscale identity token
+const idToken = await getTsidpToken();
+
+// 2. Ask OpenCloak for Discord access
+const response = await fetch("http://opencloak:3422/token", {
+  method: "POST",
+  body: new URLSearchParams({
+    grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
+    actor_token: idToken,
+    actor_token_type: "urn:ietf:params:oauth:token-type:id_token",
+    resource: "https://discord.com/api",
+    scope: "webhook.incoming"
+  })
+});
+
+// 3. Post to Discord with the scoped token OpenCloak gave me
+const { webhook_url } = await response.json();
+await fetch(webhook_url, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ content: "Hello from my AI agent!" })
+});
+```
 
 ## API Endpoints
 
