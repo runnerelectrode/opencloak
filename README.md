@@ -369,15 +369,40 @@ EOF
 launchctl load ~/Library/LaunchAgents/com.opencloak.vault.plist
 ```
 
-### Option C: Local dev (no Tailscale)
+### Option C: Local dev
 
-For testing without a tailnet, run tsidp locally and trust its issuer:
+Tailscale is **required** even for local development. tsidp can't work without it — its entire job is to ask the local Tailscale daemon "who is making this request?" via the WhoIs API. Without Tailscale running, there are no identities to verify.
+
+The dependency chain:
+
+```
+Tailscale (the network + identity layer)
+  └── tsidp (converts Tailscale identity -> signed OIDC tokens)
+        └── OpenCloak (accepts those tokens, enforces policy, returns scoped API access)
+```
+
+**1. Install Tailscale and join your tailnet:**
 
 ```bash
-# Terminal 1: start tsidp locally
-TAILSCALE_USE_WIP_CODE=1 go run . -local-port 4443
+# macOS
+brew install tailscale
 
-# Terminal 2: start OpenCloak, trusting the local tsidp
+# Linux
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+```
+
+**2. Run tsidp with `--use-local-tailscaled`:**
+
+```bash
+TAILSCALE_USE_WIP_CODE=1 go run . --use-local-tailscaled -local-port 4443
+```
+
+tsidp connects to your local Tailscale daemon and identifies requests by their Tailscale IP.
+
+**3. Start OpenCloak, trusting the local tsidp issuer:**
+
+```bash
 OPENCLOAK_TRUSTED_ISSUERS=http://localhost:4443 node cli.mjs start --port 3422
 ```
 
