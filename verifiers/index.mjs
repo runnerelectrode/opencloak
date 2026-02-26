@@ -1,4 +1,4 @@
-import { verifyOidcToken, OidcError, setTrustedIssuers, flushJwksCache } from "./oidc.mjs";
+import { verifyOidcToken, OidcError, setTrustedIssuers, loadTrustedIssuersFromEnv, flushJwksCache } from "./oidc.mjs";
 
 const TOKEN_TYPE_ID_TOKEN =
   "urn:ietf:params:oauth:token-type:id_token";
@@ -31,4 +31,4 @@ export class VerifierError extends Error {
   }
 }
 
-export { OidcError, setTrustedIssuers, flushJwksCache };
+export { OidcError, setTrustedIssuers, loadTrustedIssuersFromEnv, flushJwksCache };

@@ -1,8 +1,9 @@
 import { createPublicKey, verify } from "node:crypto";
 
 // --- Trusted issuer patterns ---
-// Only accept tokens from Tailscale tsidp issuers.
-// Override with OPENCLOAK_TRUSTED_ISSUERS env var (comma-separated).
+// Default: accept Tailscale tsidp HTTPS issuers.
+// Override with OPENCLOAK_TRUSTED_ISSUERS env var (comma-separated URLs or patterns).
+// Example: OPENCLOAK_TRUSTED_ISSUERS=http://localhost:4443,https://idp.mytailnet.ts.net
 const DEFAULT_ISSUER_PATTERNS = [
   /^https:\/\/login\.tailscale\.com/,
   /^https:\/\/[a-z0-9-]+\.ts\.net/,
@@ -11,8 +12,29 @@ const DEFAULT_ISSUER_PATTERNS = [
 
 let trustedIssuers = DEFAULT_ISSUER_PATTERNS;
 
+/**
+ * Set trusted issuers. Accepts RegExp patterns or exact URL strings.
+ */
 export function setTrustedIssuers(patterns) {
   trustedIssuers = patterns;
+}
+
+/**
+ * Load trusted issuers from OPENCLOAK_TRUSTED_ISSUERS env var.
+ * Merges with defaults rather than replacing them.
+ */
+export function loadTrustedIssuersFromEnv() {
+  const envVal = process.env.OPENCLOAK_TRUSTED_ISSUERS;
+  if (!envVal) return;
+
+  const custom = envVal
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  // Merge custom issuers with defaults
+  trustedIssuers = [...DEFAULT_ISSUER_PATTERNS, ...custom];
+  console.log(`Trusted issuers: ${custom.join(", ")} (+ defaults)`);
 }
 
 // --- Algorithm allowlist ---
@@ -63,6 +85,12 @@ export async function verifyOidcToken(token, options = {}) {
     throw new OidcError(`untrusted issuer: ${payload.iss}`);
   }
 
+  // Determine if this is a trusted local issuer (HTTP allowed)
+  const issuerUrl = new URL(payload.iss);
+  const isLocalIssuer =
+    issuerUrl.protocol === "http:" &&
+    (issuerUrl.hostname === "localhost" || issuerUrl.hostname === "127.0.0.1");
+
   // --- Check expiry (with 30s clock skew tolerance) ---
   const now = Math.floor(Date.now() / 1000);
   if (payload.exp < now - 30) {
@@ -93,7 +121,7 @@ export async function verifyOidcToken(token, options = {}) {
 
   // --- Fetch OIDC discovery → JWKS (issuer already validated) ---
   const discoveryUrl = `${payload.iss.replace(/\/$/, "")}/.well-known/openid-configuration`;
-  const discovery = await fetchJson(discoveryUrl);
+  const discovery = await fetchJson(discoveryUrl, isLocalIssuer);
   if (!discovery.jwks_uri) {
     throw new OidcError("OIDC discovery missing jwks_uri");
   }
@@ -105,7 +133,7 @@ export async function verifyOidcToken(token, options = {}) {
     throw new OidcError("jwks_uri origin does not match issuer origin");
   }
 
-  const jwks = await getJwks(discovery.jwks_uri);
+  const jwks = await getJwks(discovery.jwks_uri, isLocalIssuer);
 
   // --- Find matching key (strict: require kid match) ---
   if (!header.kid) {
@@ -160,16 +188,27 @@ function safeParse(b64url) {
   }
 }
 
-async function fetchJson(url) {
-  // Validate URL is HTTPS
+/**
+ * Fetch JSON from a URL.
+ * @param {string} url
+ * @param {boolean} allowHttp - If true, allow HTTP (for trusted local issuers only)
+ */
+async function fetchJson(url, allowHttp = false) {
   const parsed = new URL(url);
-  if (parsed.protocol !== "https:") {
+
+  if (!allowHttp && parsed.protocol !== "https:") {
     throw new OidcError(`OIDC endpoints must use HTTPS: ${url}`);
   }
 
-  // Block private/internal IP ranges (SSRF protection)
-  if (isPrivateHost(parsed.hostname)) {
+  // Block private/internal IP ranges — except when allowHttp is true
+  // (which means this is an explicitly trusted local issuer)
+  if (!allowHttp && isPrivateHost(parsed.hostname)) {
     throw new OidcError(`OIDC endpoint resolves to private address: ${parsed.hostname}`);
+  }
+
+  // Even for local issuers, block cloud metadata endpoints
+  if (isMetadataHost(parsed.hostname)) {
+    throw new OidcError(`OIDC endpoint blocked: ${parsed.hostname}`);
   }
 
   const controller = new AbortController();
@@ -187,29 +226,29 @@ async function fetchJson(url) {
 }
 
 function isPrivateHost(hostname) {
-  // Block obvious private ranges — DNS resolution happens at fetch time,
-  // but we can catch literal IPs here.
   if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") {
     return true;
   }
-  // 10.x.x.x, 172.16-31.x.x, 192.168.x.x, 169.254.x.x (link-local/metadata)
   if (/^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|169\.254\.)/.test(hostname)) {
-    return true;
-  }
-  // AWS/GCP/Azure metadata endpoints
-  if (hostname === "metadata.google.internal") {
     return true;
   }
   return false;
 }
 
-async function getJwks(jwksUri) {
+function isMetadataHost(hostname) {
+  if (hostname === "metadata.google.internal") return true;
+  // AWS/Azure metadata IP
+  if (hostname === "169.254.169.254") return true;
+  return false;
+}
+
+async function getJwks(jwksUri, allowHttp = false) {
   const cached = jwksCache.get(jwksUri);
   if (cached && cached.expiresAt > Date.now()) {
     return cached.data;
   }
 
-  const jwks = await fetchJson(jwksUri);
+  const jwks = await fetchJson(jwksUri, allowHttp);
 
   // Evict oldest entries if cache is full
   if (jwksCache.size >= MAX_CACHE_SIZE) {

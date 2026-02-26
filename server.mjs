@@ -5,6 +5,7 @@ import { getAdapter, DEFAULTS, genId } from "./config.mjs";
 import { handleTokenExchange } from "./grants/token-exchange.mjs";
 import { DiscordProvider } from "./providers/discord.mjs";
 import { GenericOAuthProvider } from "./providers/generic-oauth.mjs";
+import { loadTrustedIssuersFromEnv } from "./verifiers/index.mjs";
 
 // --- Provider instance cache ---
 const providerInstances = new Map();
@@ -149,6 +150,7 @@ const VALID_PROVIDER_NAME = /^[a-z0-9-]+$/;
  * Start the vault server.
  */
 export async function startServer(options = {}) {
+  loadTrustedIssuersFromEnv();
   const port = options.port || DEFAULTS.port;
   const issuer = options.issuer || `http://localhost:${port}`;
   const adapter = getAdapter(options.dataDir);
