@@ -2,6 +2,8 @@ import { verifyOidcToken, OidcError, setTrustedIssuers, loadTrustedIssuersFromEn
 
 const TOKEN_TYPE_ID_TOKEN =
   "urn:ietf:params:oauth:token-type:id_token";
+const TOKEN_TYPE_SANDBOX =
+  "urn:opencloak:token-type:sandbox_token";
 
 /**
  * Verify an actor token based on its declared type.
@@ -17,11 +19,29 @@ export async function verifyActorToken(token, tokenType, options = {}) {
     case TOKEN_TYPE_ID_TOKEN:
       return verifyOidcToken(token, options);
 
+    case TOKEN_TYPE_SANDBOX:
+      return verifySandboxToken(token);
+
     default:
       throw new VerifierError(
         `unsupported actor_token_type: ${tokenType}`
       );
   }
+}
+
+/**
+ * Verify a sandbox token. The token IS the identity string (e.g., "sandbox:<id>").
+ * Used in Daytona sandboxes where the sandbox itself is the identity boundary.
+ */
+function verifySandboxToken(token) {
+  if (!token || typeof token !== "string" || token.length > 256) {
+    throw new VerifierError("invalid sandbox token");
+  }
+  return {
+    sub: token,
+    iss: "opencloak:sandbox",
+    aud: "opencloak",
+  };
 }
 
 export class VerifierError extends Error {
