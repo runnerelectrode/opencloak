@@ -215,6 +215,132 @@ curl -X POST <webhook_url> \
   -d '{"content": "Hello from OpenClaw via OpenCloak!"}'
 ```
 
+## Running in Daytona
+
+OpenCloak runs inside a [Daytona](https://github.com/daytonaio/daytona) sandbox as a secrets vault. Your agent never sees OAuth credentials — it asks OpenCloak for scoped tokens at runtime.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Daytona Sandbox                       │
+│                                                         │
+│   ┌────────────┐         ┌──────────────┐               │
+│   │  OpenClaw  │ ──────> │  OpenCloak   │──────────┐    │
+│   │  (agent)   │ <────── │  (vault)     │<─────┐   │    │
+│   └────────────┘         └──────────────┘      │   │    │
+│         │                                      │   │    │
+└─────────│──────────────────────────────────────│───│────┘
+          │                                      │   │
+          ▼                                      │   ▼
+   ┌──────────────┐                        ┌──────────────┐
+   │  GitHub API  │                        │  Discord API │
+   │  Slack API   │                        │  Google API  │
+   └──────────────┘                        └──────────────┘
+```
+
+### Quick start
+
+**1. Create a sandbox and install OpenCloak:**
+
+```python
+from daytona import Daytona, DaytonaConfig
+
+daytona = Daytona(DaytonaConfig(api_key="YOUR_DAYTONA_API_KEY"))
+sandbox = daytona.create()
+
+# Install OpenCloak inside the sandbox
+sandbox.process.execute_command(
+    "git clone https://github.com/runnerelectrode/opencloak.git /home/daytona/opencloak"
+)
+
+# Start the vault server
+sandbox.process.execute_command(
+    "cd /home/daytona/opencloak && node cli.mjs start --data-dir /home/daytona/vault-data --port 3422 &"
+)
+```
+
+**2. Configure providers from inside the sandbox:**
+
+```python
+# Register GitHub as a provider
+sandbox.process.execute_command(
+    "cd /home/daytona/opencloak && node cli.mjs add-provider github "
+    "--client-id YOUR_GITHUB_CLIENT_ID "
+    "--client-secret YOUR_GITHUB_CLIENT_SECRET "
+    "--authorize-url https://github.com/login/oauth/authorize "
+    "--token-url https://github.com/login/oauth/access_token "
+    "--resource-uri https://api.github.com "
+    "--data-dir /home/daytona/vault-data"
+)
+
+# Register the agent and set policy
+sandbox.process.execute_command(
+    f"cd /home/daytona/opencloak && node cli.mjs register-agent "
+    f"--ts-identity sandbox:{sandbox.id} "
+    f"--data-dir /home/daytona/vault-data"
+)
+
+sandbox.process.execute_command(
+    f"cd /home/daytona/opencloak && node cli.mjs policy set "
+    f"sandbox:{sandbox.id} github --scopes repo,read:user "
+    f"--data-dir /home/daytona/vault-data"
+)
+```
+
+**3. Connect your account (one-time, human-in-the-loop):**
+
+```python
+# This prints an authorization URL — open it in your browser
+response = sandbox.process.execute_command(
+    "cd /home/daytona/opencloak && node cli.mjs connect github "
+    "--scopes 'repo read:user' "
+    "--data-dir /home/daytona/vault-data"
+)
+print(response.result)  # Open this URL in your browser to authorize
+```
+
+**4. Agent requests tokens at runtime (no credentials exposed):**
+
+```javascript
+// This runs inside the sandbox — the agent's code
+const response = await fetch("http://localhost:3422/token", {
+  method: "POST",
+  headers: { "Content-Type": "application/x-www-form-urlencoded" },
+  body: new URLSearchParams({
+    grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
+    actor_token: identityToken,
+    actor_token_type: "urn:ietf:params:oauth:token-type:id_token",
+    resource: "https://api.github.com",
+    scope: "repo",
+  }),
+});
+
+const { access_token } = await response.json();
+
+// Use the scoped token — agent never saw the OAuth client secret
+const repos = await fetch("https://api.github.com/user/repos", {
+  headers: { Authorization: `Bearer ${access_token}` },
+});
+```
+
+### Why this matters
+
+Without OpenCloak, Daytona sandboxes receive raw credentials as environment variables:
+
+```python
+# Without OpenCloak — credentials exposed inside sandbox
+sandbox = daytona.create(env_vars={"GITHUB_TOKEN": "ghp_xxxxxxxxxxxx"})
+```
+
+With OpenCloak, the sandbox never sees long-lived credentials:
+
+```python
+# With OpenCloak — only the vault URL is exposed
+sandbox = daytona.create(env_vars={"OPENCLOAK_URL": "http://localhost:3422"})
+# Agent requests scoped, short-lived tokens at runtime
+```
+
+See [`examples/daytona/`](examples/daytona/) for the full runnable demo.
+
 ## Deployment
 
 OpenCloak should only be accessible within your tailnet — never exposed to the public internet. Below are guides for common setups.
