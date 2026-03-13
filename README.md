@@ -180,29 +180,32 @@ OpenCloak works with [Daytona](https://www.daytona.io/) sandboxes. The agent run
 > **Heroku required for Daytona.** Daytona Tier 1/Tier 2 sandboxes restrict outbound network access to a fixed allowlist. `*.herokuapp.com` is on that allowlist, but custom domains and arbitrary VPS IPs are not. You'll need to deploy OpenCloak to Heroku (or another allowlisted host) for the sandbox to reach the vault. See the [Heroku deployment section](#heroku) below.
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Daytona Sandbox                       │
-│                                                         │
-│   ┌────────────┐                                        │
-│   │  OpenClaw  │─── POST /device/code ──────────────┐   │
-│   │  (agent)   │─── GET  /device/token (poll) ──┐   │   │
-│   │            │─── POST /token (exchange) ──┐  │   │   │
-│   └────────────┘                             │  │   │   │
-│                                              │  │   │   │
-└──────────────────────────────────────────────│──│───│───┘
-                                               │  │   │
-                                               ▼  ▼   ▼
-                                        ┌──────────────┐
-                                        │  OpenCloak   │
-                                        │  (vault)     │
-                                        └──────┬───────┘
-                                               │
-                            ┌──────────────────┼──────────────────┐
-                            ▼                  ▼                  ▼
-                     ┌────────────┐    ┌────────────┐    ┌────────────┐
-                     │  Google    │    │  Discord   │    │  GitHub    │
-                     │  (OIDC)   │    │  (API)     │    │  (API)     │
-                     └────────────┘    └────────────┘    └────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                       Daytona Sandbox                        │
+│                                                              │
+│   ┌────────────┐                                             │
+│   │  OpenClaw  │─── POST /device/code ────────┐              │
+│   │  (agent)   │─── GET  /device/token ───┐   │              │
+│   │            │─── POST /token ───────┐  │   │              │
+│   │            │                       │  │   │              │
+│   │            │<── webhook_url ───────┘  │   │              │
+│   │            │                          │   │              │
+│   │            │─── POST webhook_url ─────│───│──────┐       │
+│   └────────────┘                          │   │      │       │
+│                                           │   │      │       │
+└───────────────────────────────────────────│───│──────│───────┘
+                                            │   │      │
+                                            ▼   ▼      ▼
+                                     ┌────────────┐  ┌─────────┐
+                                     │  OpenCloak │  │ Discord │
+                                     │  (vault)   │  │  API    │
+                                     └──────┬─────┘  └─────────┘
+                                            │
+                                            ▼
+                                     ┌────────────┐
+                                     │   Google   │
+                                     │   (OIDC)   │
+                                     └────────────┘
 ```
 
 ### Daytona Demo
