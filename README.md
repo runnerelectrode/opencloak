@@ -251,8 +251,9 @@ heroku config:set \
   OPENCLOAK_ISSUER=https://your-app.herokuapp.com \
   GOOGLE_CLIENT_ID=... \
   GOOGLE_CLIENT_SECRET=... \
-  LINEAR_API_KEY=lin_api_... \
-  LINEAR_TEAM_ID=...
+  LINEAR_CLIENT_ID=... \
+  LINEAR_CLIENT_SECRET=... \
+  LINEAR_TEAM_ID=<uuid>  # Team UUID, not the short key
 
 # Deploy
 git push heroku main
