@@ -18,9 +18,6 @@ const ISSUER = process.env.OPENCLOAK_ISSUER || `http://localhost:${PORT}`;
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
-const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
-const DISCORD_WEBHOOK_ID = process.env.DISCORD_WEBHOOK_ID;
-const DISCORD_WEBHOOK_TOKEN = process.env.DISCORD_WEBHOOK_TOKEN;
 
 async function writeJson(collection, id, data) {
   const dir = path.join(DATA_DIR, collection);
@@ -48,19 +45,19 @@ async function seed() {
     console.log("  Seeded issuer: google");
   }
 
-  // Discord provider
-  await writeJson("providers", "discord", {
-    name: "discord",
-    client_id: "demo-client-id",
-    client_secret: "demo-client-secret",
-    authorize_url: "https://discord.com/oauth2/authorize",
-    token_url: "https://discord.com/api/oauth2/token",
-    revoke_url: "https://discord.com/api/oauth2/token/revoke",
-    resource_uri: "https://discord.com/api",
+  // Linear provider
+  await writeJson("providers", "linear", {
+    name: "linear",
+    client_id: process.env.LINEAR_CLIENT_ID || "demo",
+    client_secret: process.env.LINEAR_CLIENT_SECRET || "demo",
+    authorize_url: "https://linear.app/oauth/authorize",
+    token_url: "https://api.linear.app/oauth/token",
+    revoke_url: "https://api.linear.app/oauth/revoke",
+    resource_uri: "https://api.linear.app",
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   });
-  console.log("  Seeded provider: discord");
+  console.log("  Seeded provider: linear");
 
   // Owner
   await writeJson("owners", "demo-owner", {
@@ -68,26 +65,6 @@ async function seed() {
     created_at: new Date().toISOString(),
   });
   console.log("  Seeded owner: demo-owner");
-
-  // Discord webhook account
-  if (DISCORD_WEBHOOK_URL && DISCORD_WEBHOOK_ID && DISCORD_WEBHOOK_TOKEN) {
-    await writeJson("accounts", "demo-account", {
-      owner_id: "demo-owner",
-      provider_id: "discord",
-      access_token: "not-used",
-      refresh_token: "not-used",
-      scopes_granted: "webhook.incoming",
-      webhook_data: {
-        id: DISCORD_WEBHOOK_ID,
-        token: DISCORD_WEBHOOK_TOKEN,
-        url: DISCORD_WEBHOOK_URL,
-        channel_id: "644073406211555351",
-        guild_id: "644073406211555348",
-      },
-      created_at: new Date().toISOString(),
-    });
-    console.log("  Seeded account: demo-account (discord webhook)");
-  }
 
   // Registered agents (JSON: [{"identity":"...","owner":"..."},...])
   const agentsJson = process.env.REGISTERED_AGENTS;
@@ -101,13 +78,13 @@ async function seed() {
           identity: a.identity,
           created_at: new Date().toISOString(),
         });
-        await writeJson("policies", `${agentId}:discord`, {
+        await writeJson("policies", `${agentId}:linear`, {
           agent_id: agentId,
-          provider_id: "discord",
-          allowed_scopes: (a.scopes || "webhook.incoming").split(","),
+          provider_id: "linear",
+          allowed_scopes: (a.scopes || "issues:create,read").split(","),
           created_at: new Date().toISOString(),
         });
-        console.log(`  Seeded agent: ${a.identity} → discord (${a.scopes || "webhook.incoming"})`);
+        console.log(`  Seeded agent: ${a.identity} → linear (${a.scopes || "issues:create,read"})`);
       }
     } catch (e) {
       console.error("  Failed to parse REGISTERED_AGENTS:", e.message);

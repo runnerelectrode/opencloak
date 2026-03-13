@@ -5,7 +5,8 @@
  *
  * An AI agent in a headless Daytona sandbox uses RFC 8628 device
  * authorization to get human approval, then exchanges the id_token
- * for a Discord webhook credential via RFC 8693 token exchange.
+ * for a Linear Bearer token via RFC 8693 token exchange and creates
+ * a Linear issue directly from the sandbox.
  */
 
 import { Daytona } from "@daytonaio/sdk";
@@ -14,11 +15,13 @@ import readline from "node:readline";
 const DAYTONA_API_KEY = process.env.DAYTONA_API_KEY;
 const DAYTONA_API_URL = process.env.DAYTONA_API_URL || "https://app.daytona.io/api";
 const HEROKU_API_KEY = process.env.HEROKU_API_KEY;
+const LINEAR_TEAM_ID = process.env.LINEAR_TEAM_ID;
 const OPENCLOAK_URL = "https://opencloak-839b85b2946d.herokuapp.com";
 const HEROKU_APP = "opencloak";
 
 if (!DAYTONA_API_KEY) { console.error("Set DAYTONA_API_KEY"); process.exit(1); }
 if (!HEROKU_API_KEY) { console.error("Set HEROKU_API_KEY"); process.exit(1); }
+if (!LINEAR_TEAM_ID) { console.error("Set LINEAR_TEAM_ID"); process.exit(1); }
 
 async function exec(sandbox, cmd, label) {
   if (label) console.log(`\n--- ${label} ---`);
@@ -180,7 +183,7 @@ console.log("TIMEOUT"); process.exit(1);
     console.log("\nStep 5: Registering agent identity on vault...");
     console.log(`  Setting REGISTERED_AGENTS with identity: ${sub}`);
 
-    const agentsConfig = JSON.stringify([{ identity: sub, owner: "demo-owner", scopes: "webhook.incoming" }]);
+    const agentsConfig = JSON.stringify([{ identity: sub, owner: "demo-owner", scopes: "issues:create,read" }]);
     await herokuSetConfig("REGISTERED_AGENTS", agentsConfig);
 
     console.log("  Waiting for Heroku dyno restart...");
@@ -192,9 +195,9 @@ console.log("TIMEOUT"); process.exit(1);
     console.log("  Vault is back up with agent registered.");
 
     // =========================================================
-    // Step 6: Agent exchanges id_token for Discord webhook
+    // Step 6: Agent exchanges id_token for Linear Bearer token
     // =========================================================
-    console.log("\nStep 6: Agent exchanges id_token for Discord webhook...");
+    console.log("\nStep 6: Agent exchanges id_token for Linear Bearer token...");
 
     const exchangeScript = `
 const res = await fetch("${OPENCLOAK_URL}/token", {
@@ -204,53 +207,49 @@ const res = await fetch("${OPENCLOAK_URL}/token", {
     grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
     actor_token: \`${idToken}\`,
     actor_token_type: "urn:ietf:params:oauth:token-type:id_token",
-    resource: "https://discord.com/api",
-    scope: "webhook.incoming",
+    resource: "https://api.linear.app",
+    scope: "issues:create",
   }),
 });
 const data = await res.json();
 console.log("EXCHANGE:" + JSON.stringify(data));
 if (data.error) process.exit(1);
 
-// Post to Discord
-try {
-  const dr = await fetch(data.webhook_url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      content: "**Device Flow Demo — OpenCloak + Daytona**\\n\\nThis message was sent by an AI agent in a **headless Daytona sandbox**.\\n\\nFlow: RFC 8628 Device Auth \\u2192 Google sign-in \\u2192 RFC 8693 Token Exchange \\u2192 Discord webhook\\n\\nThe agent never had Discord credentials. A human authorized it by entering a short code.",
-      username: "OpenClaw (Device Flow)",
-    }),
-  });
-  console.log("DISCORD_STATUS:" + dr.status);
-  if (dr.status === 204 || dr.status === 200) console.log("DISCORD_OK");
-  else console.log("RELAY_WEBHOOK:" + data.webhook_url);
-} catch (e) {
-  console.log("RELAY_WEBHOOK:" + data.webhook_url);
+// Create a Linear issue
+const sr = await fetch("https://api.linear.app/graphql", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "Authorization": "Bearer " + data.access_token,
+  },
+  body: JSON.stringify({
+    query: \`mutation {
+      issueCreate(input: {
+        title: "Device Flow Demo — OpenCloak + Daytona"
+        description: "This issue was created by an AI agent in a headless Daytona sandbox.\\n\\nFlow: RFC 8628 Device Auth → Google sign-in → RFC 8693 Token Exchange → Linear API\\n\\nThe agent never had Linear credentials."
+        teamId: "${LINEAR_TEAM_ID}"
+      }) {
+        success
+        issue { id identifier title url }
+      }
+    }\`,
+  }),
+});
+const result = await sr.json();
+console.log("LINEAR_RESULT:" + JSON.stringify(result));
+if (result.data?.issueCreate?.success) {
+  console.log("LINEAR_OK");
+  console.log("ISSUE_URL:" + result.data.issueCreate.issue.url);
+  console.log("ISSUE_ID:" + result.data.issueCreate.issue.identifier);
 }
 `.trim();
 
     await exec(sandbox, `cat > /tmp/exchange.mjs << 'EOF'\n${exchangeScript}\nEOF`);
-    const exResult = await exec(sandbox, "node /tmp/exchange.mjs 2>&1", "POST /token + Discord (from sandbox)");
+    const exResult = await exec(sandbox, "node /tmp/exchange.mjs 2>&1", "POST /token + Linear issue (from sandbox)");
 
     const exOutput = exResult.result || "";
-
-    // Relay if Discord blocked from sandbox
-    const relayMatch = exOutput.match(/RELAY_WEBHOOK:(https:\/\/[^\s]+)/);
-    if (relayMatch) {
-      console.log("\n  Relaying Discord post from outside sandbox...");
-      const relayRes = await fetch(relayMatch[1], {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          content: "**Device Flow Demo — OpenCloak + Daytona**\n\nThis message was sent by an AI agent in a **headless Daytona sandbox**.\n\nFlow: RFC 8628 Device Auth → Google sign-in → RFC 8693 Token Exchange → Discord webhook\n\nThe agent never had Discord credentials. A human authorized it by entering a short code.",
-          username: "OpenClaw (Device Flow)",
-        }),
-      });
-      console.log(relayRes.status === 204 || relayRes.status === 200
-        ? "  Message posted to Discord!"
-        : `  Discord returned ${relayRes.status}`);
-    }
+    const issueUrl = exOutput.match(/ISSUE_URL:(.+)/)?.[1]?.trim();
+    const issueId = exOutput.match(/ISSUE_ID:(.+)/)?.[1]?.trim();
 
     console.log(`
 ╔══════════════════════════════════════════════════════════╗
@@ -260,10 +259,10 @@ try {
   1. Agent (sandbox) called POST /device/code → got code ${user_code}
   2. Human signed in with Google at /device/verify
   3. Agent polled GET /device/token → got id_token (sub: ${sub})
-  4. Agent called POST /token (RFC 8693) → got Discord webhook
-  5. Message posted to Discord
+  4. Agent called POST /token (RFC 8693) → got Linear Bearer token
+  5. Agent created Linear issue${issueId ? ` ${issueId}` : ""}${issueUrl ? `\n     ${issueUrl}` : ""}
 
-  The agent never had Discord credentials in its environment.
+  The agent never had Linear credentials in its environment.
 
   Sandbox: ${sandbox.id}
   Clean up: https://app.daytona.io/dashboard

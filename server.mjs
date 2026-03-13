@@ -490,6 +490,63 @@ export async function startServer(options = {}) {
         }
       }
 
+      // --- GET /connect/:provider — Start OAuth connect flow from browser ---
+      if (pathname.startsWith("/connect/") && req.method === "GET") {
+        const providerName = decodeURIComponent(
+          pathname.split("/connect/")[1] || ""
+        );
+        if (
+          !providerName ||
+          !VALID_PROVIDER_NAME.test(providerName) ||
+          providerName.includes("..")
+        ) {
+          return json(res, 400, {
+            error: "invalid_request",
+            error_description: "invalid provider name",
+          });
+        }
+
+        const providerConfig = await adapter.find("providers", providerName);
+        if (!providerConfig) {
+          return json(res, 404, {
+            error: "not_found",
+            error_description: `provider '${providerName}' not configured`,
+          });
+        }
+
+        // Ensure we have an owner
+        const owners = await adapter.findAll("owners");
+        const owner = owners[0];
+        if (!owner) {
+          return json(res, 500, {
+            error: "server_error",
+            error_description: "no owner configured",
+          });
+        }
+
+        const scopes = url.searchParams.get("scopes") || "read";
+        const state = crypto.randomBytes(16).toString("hex");
+        const redirectUri = `${issuer}/oauth/callback/${providerName}`;
+
+        await adapter.upsert("sessions", state, {
+          provider_id: providerConfig.id,
+          owner_id: owner.id,
+          scopes,
+          created_at: new Date().toISOString(),
+        });
+
+        const providerInstance = getProviderInstance(providerConfig);
+        const authorizeUrl = providerInstance.getAuthorizeUrl(
+          scopes.split(" "),
+          state,
+          redirectUri
+        );
+
+        res.writeHead(302, { Location: authorizeUrl });
+        res.end();
+        return;
+      }
+
       // --- GET /health ---
       if (pathname === "/health" && req.method === "GET") {
         return json(res, 200, { status: "ok", version: "0.1.0" });

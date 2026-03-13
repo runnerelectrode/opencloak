@@ -7,7 +7,7 @@
   RFC 8693 token exchange · RFC 8628 device authorization · Pluggable OIDC identity.
 </p>
 
-Any AI agent proves who it is with a standard OIDC token (Google, Okta, Auth0, Azure AD, or any compliant provider). OpenCloak checks policy and returns a scoped, short-lived access token for third-party APIs (Discord, GitHub, Google, Slack). Your agent never sees or stores long-lived credentials.
+Any AI agent proves who it is with a standard OIDC token (Google, Okta, Auth0, Azure AD, or any compliant provider). OpenCloak checks policy and returns a scoped, short-lived access token for third-party APIs (Linear, GitHub, Google, Slack). Your agent never sees or stores long-lived credentials.
 
 **Zero external dependencies.** Pure Node.js 18+.
 
@@ -27,19 +27,17 @@ Any AI agent proves who it is with a standard OIDC token (Google, Okta, Auth0, A
 │   AI Agent   │────>│              │     │    Google     │
 │  (headless   │     │  OpenCloak   │<───>│    (OIDC)    │
 │   sandbox)   │<────│  (the vault) │     └──────────────┘
-└──────────────┘  ③  │              │
-       │              │              │     ┌──────────────┐
-       │              │              │────>│   Discord    │
-       │              └──────────────┘  ④  │     API      │
-       │                     │             └──────────────┘
+└──────────────┘  ⑤  │              │
+       │              └──────────────┘
        │                     │
-       │              ⑤ Scoped credential
+       │              ④ Token exchange
        │<────────────────────┘
        │
+       │  ⑥ Bearer token
        ▼
 ┌──────────────┐
-│   Discord    │
-│   webhook    │  Agent posts with credential it received
+│   Linear     │
+│   GraphQL    │  Agent calls API directly with Bearer token
 └──────────────┘
 ```
 
@@ -49,15 +47,16 @@ Any AI agent proves who it is with a standard OIDC token (Google, Okta, Auth0, A
 | ② | Human enters the code at `/device/verify`, signs in with Google |
 | ③ | Agent polls `GET /device/token` → gets `id_token` proving the human authorized it |
 | ④ | Agent calls `POST /token` (RFC 8693 token exchange) with the `id_token` |
-| ⑤ | OpenCloak checks policy, returns a scoped Discord webhook credential |
+| ⑤ | OpenCloak checks policy, returns a scoped Bearer token for Linear |
+| ⑥ | Agent calls Linear GraphQL API directly with the Bearer token |
 
-The agent never sees your Discord OAuth credentials. It only gets back what OpenCloak's policy allows. The human authorizes the agent by entering a short code — the agent never opens a browser.
+The agent never sees your Linear OAuth credentials. It only gets back what OpenCloak's policy allows — a scoped, short-lived Bearer token. The human authorizes the agent by entering a short code — the agent never opens a browser.
 
 ## Prerequisites
 
 - **Node.js 18+** installed
 - **An OIDC identity provider** (Google, Okta, Auth0, Azure AD, etc.)
-- A **third-party API** to delegate access to (Discord, GitHub, etc.)
+- A **third-party API** to delegate access to (Linear, GitHub, etc.)
 
 ## Quick Start
 
@@ -96,22 +95,22 @@ node cli.mjs add-issuer google \
 ### 4. Register an OAuth provider
 
 ```bash
-node cli.mjs add-provider discord \
-  --client-id <YOUR_DISCORD_CLIENT_ID> \
-  --client-secret <YOUR_DISCORD_CLIENT_SECRET>
+node cli.mjs add-provider linear \
+  --client-id <YOUR_LINEAR_CLIENT_ID> \
+  --client-secret <YOUR_LINEAR_CLIENT_SECRET>
 ```
 
 ### 5. Register an agent and set policy
 
 ```bash
 node cli.mjs register-agent --identity user@example.com
-node cli.mjs policy set user@example.com discord --scopes "webhook.incoming"
+node cli.mjs policy set user@example.com linear --scopes "issues:create"
 ```
 
 ### 6. Connect your account (one-time, human-in-the-loop)
 
 ```bash
-node cli.mjs connect discord --scopes "webhook.incoming"
+node cli.mjs connect linear --scopes "issues:create"
 ```
 
 ### 7. Agent performs token exchange
@@ -122,8 +121,8 @@ curl -X POST http://localhost:3422/token \
   -d "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \
   -d "actor_token=<OIDC_TOKEN>" \
   -d "actor_token_type=urn:ietf:params:oauth:token-type:id_token" \
-  -d "resource=https://discord.com/api" \
-  -d "scope=webhook.incoming"
+  -d "resource=https://api.linear.app" \
+  -d "scope=issues:create"
 ```
 
 ## Device Flow for Headless Agents
@@ -151,7 +150,7 @@ while (!idToken) {
   if (data.error === "expired_token") throw new Error("Code expired");
 }
 
-// 3. Exchange id_token for scoped credentials
+// 3. Exchange id_token for scoped Bearer token
 const tokenRes = await fetch("https://vault.example.com/token", {
   method: "POST",
   headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -159,17 +158,27 @@ const tokenRes = await fetch("https://vault.example.com/token", {
     grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
     actor_token: idToken,
     actor_token_type: "urn:ietf:params:oauth:token-type:id_token",
-    resource: "https://discord.com/api",
-    scope: "webhook.incoming",
+    resource: "https://api.linear.app",
+    scope: "issues:create",
   }),
 });
-const { webhook_url } = await tokenRes.json();
+const { access_token } = await tokenRes.json();
 
-// 4. Use the credential — agent never had Discord secrets
-await fetch(webhook_url, {
+// 4. Use the Bearer token — agent never had Linear secrets
+await fetch("https://api.linear.app/graphql", {
   method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ content: "Hello from a headless agent!" }),
+  headers: {
+    "Content-Type": "application/json",
+    "Authorization": `Bearer ${access_token}`,
+  },
+  body: JSON.stringify({
+    query: `mutation {
+      issueCreate(input: {
+        title: "Hello from a headless agent!"
+        teamId: "YOUR_TEAM_ID"
+      }) { success issue { url } }
+    }`,
+  }),
 });
 ```
 
@@ -177,7 +186,7 @@ await fetch(webhook_url, {
 
 OpenCloak works with [Daytona](https://www.daytona.io/) sandboxes. The agent runs inside a headless sandbox, authenticates via the device flow, and gets scoped credentials — without any secrets in its environment.
 
-> **Heroku required for Daytona.** Daytona Tier 1/Tier 2 sandboxes restrict outbound network access to a fixed allowlist. `*.herokuapp.com` is on that allowlist, but custom domains and arbitrary VPS IPs are not. You'll need to deploy OpenCloak to Heroku (or another allowlisted host) for the sandbox to reach the vault. See the [Heroku deployment section](#heroku) below.
+> **Heroku required for Daytona.** Daytona Tier 1/Tier 2 sandboxes restrict outbound network access to a fixed allowlist. `*.herokuapp.com` and `*.linear.app` are on that allowlist, so the agent can reach both the vault and Linear directly from the sandbox.
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -188,16 +197,16 @@ OpenCloak works with [Daytona](https://www.daytona.io/) sandboxes. The agent run
 │   │  (agent)   │─── GET  /device/token ───┐   │              │
 │   │            │─── POST /token ───────┐  │   │              │
 │   │            │                       │  │   │              │
-│   │            │<── webhook_url ───────┘  │   │              │
+│   │            │<── Bearer token ──────┘  │   │              │
 │   │            │                          │   │              │
-│   │            │─── POST webhook_url ─────│───│──────┐       │
-│   └────────────┘                          │   │      │       │
+│   │            │─── POST graphql ─────────│───│──────┐       │
+│   └────────────┘   (Bearer token)         │   │      │       │
 │                                           │   │      │       │
 └───────────────────────────────────────────│───│──────│───────┘
                                             │   │      │
                                             ▼   ▼      ▼
                                      ┌────────────┐  ┌─────────┐
-                                     │  OpenCloak │  │ Discord │
+                                     │  OpenCloak │  │ Linear  │
                                      │  (vault)   │  │  API    │
                                      └──────┬─────┘  └─────────┘
                                             │
@@ -216,18 +225,19 @@ The `examples/daytona/device-flow-demo.mjs` script runs the full flow end-to-end
 2. Agent in sandbox calls `POST /device/code` → gets a short code
 3. You sign in with Google in your browser
 4. Agent polls `GET /device/token` → gets `id_token`
-5. Agent calls `POST /token` (RFC 8693) → gets Discord webhook credential
-6. Agent posts a message to Discord
+5. Agent calls `POST /token` (RFC 8693) → gets Linear Bearer token
+6. Agent creates a Linear issue directly from the sandbox
 
 ```bash
 export DAYTONA_API_KEY=your_key
 export DAYTONA_API_URL=https://app.daytona.io/api
 export HEROKU_API_KEY=your_heroku_key
+export LINEAR_TEAM_ID=your_team_id
 
 node examples/daytona/device-flow-demo.mjs
 ```
 
-The agent never has Discord credentials in its environment. It gets them at runtime through human-authorized token exchange.
+The agent never has Linear credentials in its environment. It gets a scoped Bearer token at runtime through human-authorized token exchange, and calls the Linear API directly.
 
 ## Deployment
 
@@ -241,9 +251,8 @@ heroku config:set \
   OPENCLOAK_ISSUER=https://your-app.herokuapp.com \
   GOOGLE_CLIENT_ID=... \
   GOOGLE_CLIENT_SECRET=... \
-  DISCORD_WEBHOOK_URL=... \
-  DISCORD_WEBHOOK_ID=... \
-  DISCORD_WEBHOOK_TOKEN=...
+  LINEAR_API_KEY=lin_api_... \
+  LINEAR_TEAM_ID=...
 
 # Deploy
 git push heroku main
