@@ -14,55 +14,44 @@ Any AI agent proves who it is with a standard OIDC token (Google, Okta, Auth0, A
 ## How It Works
 
 ```
-┌──────────────┐     1      ┌──────────────┐     3      ┌──────────────┐
-│   AI Agent   │ ──────────>│  OpenCloak   │ ──────────>│   Discord    │
-│              │ <──────────│  (the vault) │ <──────────│     API      │
-└──────────────┘     2      └──────────────┘     4      └──────────────┘
-       │                          ▲
-       │                          │
-       └──────────────────────────┘
+                        ┌─────────┐
+                        │  Human  │
+                        │(browser)│
+                        └────┬────┘
+                             │
+                        ② Enters code
+                        Signs in with Google
+                             │
+                             ▼
+┌──────────────┐  ①  ┌──────────────┐     ┌──────────────┐
+│   AI Agent   │────>│              │     │    Google     │
+│  (headless   │     │  OpenCloak   │<───>│    (OIDC)    │
+│   sandbox)   │<────│  (the vault) │     └──────────────┘
+└──────────────┘  ③  │              │
+       │              │              │     ┌──────────────┐
+       │              │              │────>│   Discord    │
+       │              └──────────────┘  ④  │     API      │
+       │                     │             └──────────────┘
+       │                     │
+       │              ⑤ Scoped credential
+       │<────────────────────┘
        │
        ▼
 ┌──────────────┐
-│    OIDC      │
-│  Provider    │
-│  (identity)  │
+│   Discord    │
+│   webhook    │  Agent posts with credential it received
 └──────────────┘
 ```
 
-| Step | Who | Does what |
-|------|-----|-----------|
-| 1 | Agent → OIDC Provider | "Give me an identity token" (Google, Okta, etc.) |
-| 2 | Agent → OpenCloak | "Here's my identity proof, give me Discord access" (`POST /token`, RFC 8693) |
-| 3 | OpenCloak | Verifies identity, checks policy, returns scoped token |
-| 4 | Agent → Discord | Uses the scoped token OpenCloak returned |
+| Step | What happens |
+|------|-------------|
+| ① | Agent calls `POST /device/code` → gets a short code like `BCDF-GH34` |
+| ② | Human enters the code at `/device/verify`, signs in with Google |
+| ③ | Agent polls `GET /device/token` → gets `id_token` proving the human authorized it |
+| ④ | Agent calls `POST /token` (RFC 8693 token exchange) with the `id_token` |
+| ⑤ | OpenCloak checks policy, returns a scoped Discord webhook credential |
 
-The agent never sees your Discord OAuth credentials. It only gets back what OpenCloak's policy allows.
-
-## Device Authorization Flow (RFC 8628)
-
-For headless AI agents that can't open a browser (e.g. agents running in [Daytona](https://www.daytona.io/) sandboxes), OpenCloak implements the OAuth 2.0 Device Authorization Grant:
-
-```
-Agent (headless sandbox)            Human (browser, any device)
-────────────────────────            ──────────────────────────
-POST /device/code
-  ← device_code, user_code
-  ← "BCDF-GH34"
-
-prints: "Enter code: BCDF-GH34"
-                                    Opens URL, enters code
-                                    Signs in with Google
-                                    ← "Authorization complete"
-
-GET /device/token (polling)
-  ← { id_token, claims }
-
-POST /token (RFC 8693 exchange)
-  ← scoped Discord webhook credential
-```
-
-The agent gets a short code, the human enters it on any device and signs in with their identity provider. The agent polls until it gets the `id_token`, then exchanges it for scoped API credentials via RFC 8693.
+The agent never sees your Discord OAuth credentials. It only gets back what OpenCloak's policy allows. The human authorizes the agent by entering a short code — the agent never opens a browser.
 
 ## Prerequisites
 
