@@ -177,6 +177,8 @@ await fetch(webhook_url, {
 
 OpenCloak works with [Daytona](https://www.daytona.io/) sandboxes. The agent runs inside a headless sandbox, authenticates via the device flow, and gets scoped credentials — without any secrets in its environment.
 
+> **Heroku required for Daytona.** Daytona Tier 1/Tier 2 sandboxes restrict outbound network access to a fixed allowlist. `*.herokuapp.com` is on that allowlist, but custom domains and arbitrary VPS IPs are not. You'll need to deploy OpenCloak to Heroku (or another allowlisted host) for the sandbox to reach the vault. See the [Heroku deployment section](#heroku) below.
+
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                    Daytona Sandbox                       │
