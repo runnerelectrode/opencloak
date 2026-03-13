@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenCloak OIDC Demo</title>
+  <link rel="stylesheet" href="/web/style.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>OpenCloak OIDC Demo</h1>
+      <p>Sign in to see your ID token and try an RFC 8693 token exchange</p>
+    </header>
+
+    <!-- Section 1: Sign In -->
+    <section id="sign-in" class="section">
+      <div class="card">
+        <h2>Sign In</h2>
+        <div id="issuer-buttons" class="signin-buttons">
+          <p class="loading">Loading providers...</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Section 2: Identity -->
+    <section id="identity" class="section">
+      <div class="card">
+        <h2>Your Identity</h2>
+        <div class="user-info">
+          <strong id="user-name"></strong>
+          <span id="user-detail"></span>
+        </div>
+
+        <h3>Decoded Claims</h3>
+        <pre id="claims-json"></pre>
+
+        <details class="token-display">
+          <summary>Raw ID Token</summary>
+          <pre id="raw-token"></pre>
+        </details>
+
+        <div class="actions">
+          <button id="logout-btn" class="btn btn-secondary">Sign Out</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Section 3: Token Exchange -->
+    <section id="exchange" class="section">
+      <div class="card">
+        <h2>Token Exchange</h2>
+        <p class="explainer">
+          This is what an AI agent does &mdash; it presents your ID token to the vault
+          and receives scoped OAuth credentials in return (RFC 8693).
+        </p>
+
+        <details class="token-display">
+          <summary>Equivalent curl command</summary>
+          <pre id="curl-cmd"></pre>
+        </details>
+
+        <div class="actions">
+          <button id="exchange-btn" class="btn btn-primary">Try Token Exchange</button>
+        </div>
+
+        <div id="exchange-result" class="exchange-result"></div>
+      </div>
+    </section>
+  </div>
+
+  <script src="/web/app.js"></script>
+</body>
+</html>

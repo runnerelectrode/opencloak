@@ -7,6 +7,7 @@ import crypto from "node:crypto";
 const COMMANDS = {
   start,
   "add-provider": addProvider,
+  "add-issuer": addIssuer,
   connect,
   exchange,
   list,
@@ -97,11 +98,66 @@ async function addProvider(opts) {
   console.log(`Provider '${name}' registered (id: ${id})`);
 }
 
+async function addIssuer(opts) {
+  const name = opts._positional[0];
+  if (!name) {
+    console.error("Usage: opencloak add-issuer <name> --issuer-url <url> [--audience <aud>] [--client-id X --client-secret Y]");
+    process.exit(1);
+  }
+
+  const issuerUrl = opts["issuer-url"];
+  if (!issuerUrl) {
+    console.error("--issuer-url is required");
+    process.exit(1);
+  }
+
+  // Validate issuer URL is HTTPS (or http://localhost for dev)
+  try {
+    const parsed = new URL(issuerUrl);
+    const isLocalDev =
+      parsed.protocol === "http:" &&
+      (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1");
+    if (parsed.protocol !== "https:" && !isLocalDev) {
+      console.error("--issuer-url must use HTTPS (or http://localhost for dev)");
+      process.exit(1);
+    }
+  } catch {
+    console.error("--issuer-url must be a valid URL");
+    process.exit(1);
+  }
+
+  const issuerData = {
+    issuer_url: issuerUrl,
+    created_at: new Date().toISOString(),
+  };
+
+  if (opts.audience) {
+    issuerData.audience = opts.audience;
+  }
+
+  if (opts["client-id"]) {
+    issuerData.client_id = opts["client-id"];
+  }
+  if (opts["client-secret"]) {
+    issuerData.client_secret = opts["client-secret"];
+  }
+
+  await adapter.upsert("issuers", name, issuerData);
+  console.log(`Issuer '${name}' registered:`);
+  console.log(`  issuer_url: ${issuerUrl}`);
+  if (opts.audience) {
+    console.log(`  audience:   ${opts.audience}`);
+  }
+  if (opts["client-id"]) {
+    console.log(`  sign-in:    enabled`);
+  }
+}
+
 async function registerAgent(opts) {
-  const tsIdentity = opts["ts-identity"];
-  if (!tsIdentity) {
+  const identity = opts.identity;
+  if (!identity) {
     console.error(
-      "Usage: opencloak register-agent --ts-identity <email-or-tag> [--owner <owner-id>]"
+      "Usage: opencloak register-agent --identity <email-or-sub> [--owner <owner-id>]"
     );
     process.exit(1);
   }
@@ -127,39 +183,39 @@ async function registerAgent(opts) {
   const agentId = genId();
   await adapter.upsert("agents", agentId, {
     owner_id: ownerId,
-    ts_identity: tsIdentity,
+    identity: identity,
     created_at: new Date().toISOString(),
   });
 
   console.log(`Agent registered:`);
-  console.log(`  id:          ${agentId}`);
-  console.log(`  ts_identity: ${tsIdentity}`);
-  console.log(`  owner_id:    ${ownerId}`);
+  console.log(`  id:       ${agentId}`);
+  console.log(`  identity: ${identity}`);
+  console.log(`  owner_id: ${ownerId}`);
 }
 
 async function policyCmd(opts) {
   const action = opts._positional[0];
   if (action !== "set") {
-    console.error("Usage: opencloak policy set <ts-identity> <provider> --scopes <scopes>");
+    console.error("Usage: opencloak policy set <identity> <provider> --scopes <scopes>");
     process.exit(1);
   }
 
-  const tsIdentity = opts._positional[1];
+  const identity = opts._positional[1];
   const providerId = opts._positional[2];
   const scopes = opts.scopes;
 
-  if (!tsIdentity || !providerId || !scopes) {
+  if (!identity || !providerId || !scopes) {
     console.error(
-      "Usage: opencloak policy set <ts-identity> <provider> --scopes <comma-separated-scopes>"
+      "Usage: opencloak policy set <identity> <provider> --scopes <comma-separated-scopes>"
     );
     process.exit(1);
   }
 
-  // Find agent by ts_identity
-  const agents = await adapter.findBy("agents", "ts_identity", tsIdentity);
+  // Find agent by identity
+  const agents = await adapter.findBy("agents", "identity", identity);
   if (agents.length === 0) {
     console.error(
-      `No agent found with ts_identity '${tsIdentity}'. Register one first.`
+      `No agent found with identity '${identity}'. Register one first.`
     );
     process.exit(1);
   }
@@ -176,7 +232,7 @@ async function policyCmd(opts) {
   });
 
   console.log(`Policy set:`);
-  console.log(`  agent:    ${tsIdentity} (${agent.id})`);
+  console.log(`  agent:    ${identity} (${agent.id})`);
   console.log(`  provider: ${providerId}`);
   console.log(`  scopes:   ${scopeList.join(", ")}`);
 }
@@ -279,6 +335,18 @@ async function exchange(opts) {
 }
 
 async function list() {
+  console.log("\n=== Issuers ===");
+  const issuers = await adapter.findAll("issuers");
+  if (issuers.length === 0) {
+    console.log("  (none)");
+  } else {
+    for (const i of issuers) {
+      const aud = i.audience ? `, audience: ${i.audience}` : "";
+      const signin = i.client_id ? " (sign-in enabled)" : "";
+      console.log(`  ${i.id} — ${i.issuer_url}${aud}${signin}`);
+    }
+  }
+
   console.log("\n=== Providers ===");
   const providers = await adapter.findAll("providers");
   if (providers.length === 0) {
@@ -305,7 +373,7 @@ async function list() {
     console.log("  (none)");
   } else {
     for (const a of agents) {
-      console.log(`  ${a.id} — ts_identity: ${a.ts_identity}, owner: ${a.owner_id}`);
+      console.log(`  ${a.id} — identity: ${a.identity}, owner: ${a.owner_id}`);
     }
   }
 
@@ -348,10 +416,12 @@ Global Options:
 
 Commands:
   start [--port 3422]                              Start the vault server
+  add-issuer <name> --issuer-url <url> [--audience <aud>] [--client-id X --client-secret Y]
+                                                   Register an OIDC identity provider
   add-provider <name> --client-id X --client-secret Y
                                                    Register an OAuth provider
-  register-agent --ts-identity <email-or-tag>      Register an agent by Tailscale identity
-  policy set <ts-identity> <provider> --scopes <s>  Set agent permissions
+  register-agent --identity <email-or-sub>         Register an agent by OIDC identity
+  policy set <identity> <provider> --scopes <s>    Set agent permissions
   connect <provider> [--scopes "s1 s2"]            Start OAuth consent flow
   exchange --provider <name> --scope <scope>       Manual token exchange (dev)
   list                                             Show all registered entities
@@ -359,8 +429,9 @@ Commands:
 
 Examples:
   opencloak start --data-dir ./local-data --port 3422
+  opencloak add-issuer google --issuer-url https://accounts.google.com --audience CLIENT_ID
   opencloak add-provider discord --client-id 123 --client-secret abc --data-dir ./local-data
-  opencloak register-agent --ts-identity user@example.com
+  opencloak register-agent --identity user@example.com
   opencloak policy set user@example.com discord --scopes "identify,guilds"
   opencloak connect discord --scopes "identify guilds"
 `);

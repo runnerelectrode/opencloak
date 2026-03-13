@@ -1,0 +1,3 @@
+# Copy to terraform.tfvars and fill in your values
+google_client_id     = "YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com"
+google_client_secret = "GOCSPX-YOUR_GOOGLE_CLIENT_SECRET"

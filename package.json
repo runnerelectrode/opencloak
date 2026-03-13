@@ -1,7 +1,7 @@
 {
   "name": "opencloak",
   "version": "0.1.0",
-  "description": "Open-source OAuth vault for AI agents — RFC 8693 token exchange via Tailscale identity",
+  "description": "Open-source OAuth vault for AI agents — RFC 8693 token exchange",
   "type": "module",
   "main": "server.mjs",
   "bin": {
@@ -15,13 +15,16 @@
     "oauth",
     "token-vault",
     "rfc8693",
-    "tailscale",
+    "oidc",
     "ai-agents",
-    "oidc"
+    "google",
+    "okta"
   ],
   "license": "MIT",
   "engines": {
     "node": ">=18.0.0"
   },
-  "dependencies": {}
+  "dependencies": {
+    "@daytonaio/sdk": "^0.150.0"
+  }
 }

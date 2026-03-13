@@ -5,6 +5,7 @@
  * Heroku has an ephemeral filesystem, so we recreate the data on each dyno start.
  */
 
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { startServer } from "./server.mjs";
@@ -86,6 +87,31 @@ async function seed() {
       created_at: new Date().toISOString(),
     });
     console.log("  Seeded account: demo-account (discord webhook)");
+  }
+
+  // Registered agents (JSON: [{"identity":"...","owner":"..."},...])
+  const agentsJson = process.env.REGISTERED_AGENTS;
+  if (agentsJson) {
+    try {
+      const agents = JSON.parse(agentsJson);
+      for (const a of agents) {
+        const agentId = crypto.randomUUID();
+        await writeJson("agents", agentId, {
+          owner_id: a.owner || "demo-owner",
+          identity: a.identity,
+          created_at: new Date().toISOString(),
+        });
+        await writeJson("policies", `${agentId}:discord`, {
+          agent_id: agentId,
+          provider_id: "discord",
+          allowed_scopes: (a.scopes || "webhook.incoming").split(","),
+          created_at: new Date().toISOString(),
+        });
+        console.log(`  Seeded agent: ${a.identity} → discord (${a.scopes || "webhook.incoming"})`);
+      }
+    } catch (e) {
+      console.error("  Failed to parse REGISTERED_AGENTS:", e.message);
+    }
   }
 
   console.log("  Seed complete.\n");

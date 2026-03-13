@@ -9,7 +9,7 @@
  * Evaluate whether an agent can access a provider with the requested scopes.
  *
  * @param {object} adapter  - storage adapter
- * @param {string} agentId  - agent ID (looked up by tsidp sub claim)
+ * @param {string} agentId  - agent ID (looked up by OIDC sub claim)
  * @param {string} providerId - target provider ID
  * @param {string[]} requestedScopes - scopes the agent is requesting
  * @returns {{ allowed: boolean, scopes: string[], error?: string, account?: object }}
@@ -76,9 +76,9 @@ export async function evaluatePolicy(
 }
 
 /**
- * Look up an agent by their Tailscale identity (sub claim from tsidp).
+ * Look up an agent by their OIDC identity (sub claim).
  */
-export async function findAgentByIdentity(adapter, tsIdentity) {
-  const agents = await adapter.findBy("agents", "ts_identity", tsIdentity);
+export async function findAgentByIdentity(adapter, identity) {
+  const agents = await adapter.findBy("agents", "identity", identity);
   return agents[0] || null;
 }

@@ -98,7 +98,7 @@ async function main() {
   console.log("5. Registering sandbox as an agent...");
   await run(sandbox, [
     "cd /home/daytona/opencloak && node cli.mjs register-agent",
-    `--ts-identity sandbox:${sandbox.id}`,
+    `--identity sandbox:${sandbox.id}`,
     "--data-dir /home/daytona/opencloak-data",
   ].join(" "));
   console.log();

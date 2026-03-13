@@ -15,6 +15,7 @@ const COLLECTIONS = new Set([
   "providers",
   "sessions",
   "keys",
+  "issuers",
 ]);
 
 // Fields that contain secrets — encrypted at rest
@@ -214,11 +215,13 @@ export class JsonFileAdapter extends VaultAdapter {
   // --- Session cleanup (removes expired sessions) ---
 
   async cleanExpiredSessions(maxAgeMs = 10 * 60 * 1000) {
+    const WEB_SESSION_MAX_AGE_MS = 30 * 60 * 1000;
     const sessions = await this.findAll("sessions");
     const now = Date.now();
     for (const s of sessions) {
       const created = new Date(s.created_at || 0).getTime();
-      if (now - created > maxAgeMs) {
+      const ttl = s.type === "web" ? WEB_SESSION_MAX_AGE_MS : maxAgeMs;
+      if (now - created > ttl) {
         await this.destroy("sessions", s.id);
       }
     }

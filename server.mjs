@@ -1,11 +1,18 @@
 import crypto from "node:crypto";
 import http from "node:http";
-import { URL } from "node:url";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { URL, fileURLToPath } from "node:url";
 import { getAdapter, DEFAULTS, genId } from "./config.mjs";
 import { handleTokenExchange } from "./grants/token-exchange.mjs";
 import { DiscordProvider } from "./providers/discord.mjs";
 import { GenericOAuthProvider } from "./providers/generic-oauth.mjs";
-import { loadTrustedIssuersFromEnv } from "./verifiers/index.mjs";
+import { loadTrustedIssuersFromEnv, addTrustedIssuers, fetchJson } from "./verifiers/index.mjs";
+
+// --- Resolve web directory (Node 18 compat — no import.meta.dirname) ---
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const WEB_DIR = path.join(__dirname, "web");
 
 // --- Provider instance cache ---
 const providerInstances = new Map();
@@ -56,6 +63,7 @@ async function generateJwks(adapter) {
 const MAX_BODY_BYTES = 64 * 1024; // 64 KB
 const BODY_TIMEOUT_MS = 10000;
 const SESSION_MAX_AGE_MS = 10 * 60 * 1000; // 10 minutes
+const WEB_SESSION_MAX_AGE_MS = 30 * 60 * 1000; // 30 minutes
 const SESSION_CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
 // --- Rate limiter (sliding window per IP) ---
@@ -119,12 +127,22 @@ function parseBody(req) {
 }
 
 /**
- * Security headers applied to every response.
+ * Security headers for API responses.
  */
-const SECURITY_HEADERS = {
+const API_SECURITY_HEADERS = {
   "X-Content-Type-Options": "nosniff",
   "X-Frame-Options": "DENY",
   "Content-Security-Policy": "default-src 'none'",
+  "Referrer-Policy": "no-referrer",
+};
+
+/**
+ * Security headers for web page responses.
+ */
+const WEB_SECURITY_HEADERS = {
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "DENY",
+  "Content-Security-Policy": "default-src 'self'; img-src 'self' data: https:; connect-src 'self'",
   "Referrer-Policy": "no-referrer",
 };
 
@@ -138,13 +156,147 @@ function json(res, status, body) {
     "Content-Length": Buffer.byteLength(payload),
     "Cache-Control": "no-store",
     "Pragma": "no-cache",
-    ...SECURITY_HEADERS,
+    ...API_SECURITY_HEADERS,
   });
   res.end(payload);
 }
 
-// Valid provider name: alphanumeric + hyphens only
+/**
+ * Send a redirect response.
+ */
+function redirect(res, location, cookieHeader) {
+  const headers = { Location: location, ...API_SECURITY_HEADERS };
+  if (cookieHeader) {
+    headers["Set-Cookie"] = cookieHeader;
+  }
+  res.writeHead(302, headers);
+  res.end();
+}
+
+// Valid provider/issuer name: alphanumeric + hyphens only
 const VALID_PROVIDER_NAME = /^[a-z0-9-]+$/;
+
+// Allowed static file extensions
+const STATIC_EXTENSIONS = new Map([
+  [".html", "text/html; charset=utf-8"],
+  [".css", "text/css; charset=utf-8"],
+  [".js", "application/javascript; charset=utf-8"],
+  [".png", "image/png"],
+  [".svg", "image/svg+xml"],
+  [".ico", "image/x-icon"],
+]);
+
+// --- Cookie helpers ---
+
+function parseCookies(req) {
+  const header = req.headers.cookie || "";
+  return Object.fromEntries(
+    header
+      .split(";")
+      .map((c) => {
+        const [k, ...v] = c.trim().split("=");
+        return [k, v.join("=")];
+      })
+      .filter(([k]) => k)
+  );
+}
+
+function buildSessionCookie(sessionId, issuerUrl) {
+  const isLocal =
+    !issuerUrl ||
+    issuerUrl.startsWith("http://localhost") ||
+    issuerUrl.startsWith("http://127.0.0.1");
+  let cookie = `opencloak_session=${sessionId}; HttpOnly; SameSite=Lax; Path=/; Max-Age=1800`;
+  if (!isLocal) {
+    cookie += "; Secure";
+  }
+  return cookie;
+}
+
+function clearSessionCookie() {
+  return "opencloak_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0";
+}
+
+// --- PKCE helpers ---
+
+function generatePKCE() {
+  const verifier = crypto.randomBytes(32).toString("base64url");
+  const challenge = crypto
+    .createHash("sha256")
+    .update(verifier)
+    .digest("base64url");
+  return { verifier, challenge };
+}
+
+// --- Device Authorization Flow helpers ---
+const USER_CODE_ALPHABET = "BCDFGHJKLMNPQRSTVWXZ2345679";
+const DEVICE_POLL_INTERVAL_MS = 5000;
+
+function generateUserCode() {
+  const bytes = crypto.randomBytes(8);
+  let code = "";
+  for (let i = 0; i < 8; i++) code += USER_CODE_ALPHABET[bytes[i] % USER_CODE_ALPHABET.length];
+  return code.slice(0, 4) + "-" + code.slice(4);
+}
+
+function normalizeUserCode(input) {
+  return input.replace(/[\s\-]/g, "").toUpperCase();
+}
+
+function htmlPage(res, status, title, bodyHtml) {
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${title} — OpenCloak</title>
+  <link rel="stylesheet" href="/web/style.css">
+</head>
+<body>
+  <div class="container">
+    <header><h1>OpenCloak</h1></header>
+    ${bodyHtml}
+  </div>
+</body>
+</html>`;
+  res.writeHead(status, {
+    "Content-Type": "text/html; charset=utf-8",
+    "Content-Length": Buffer.byteLength(html),
+    ...WEB_SECURITY_HEADERS,
+  });
+  res.end(html);
+}
+
+// --- Static file serving ---
+
+async function serveStaticFile(res, filePath) {
+  const ext = path.extname(filePath);
+  const contentType = STATIC_EXTENSIONS.get(ext);
+  if (!contentType) {
+    json(res, 404, { error: "not_found" });
+    return;
+  }
+
+  // Path traversal protection: resolved path must be inside WEB_DIR
+  const resolved = path.resolve(filePath);
+  if (!resolved.startsWith(WEB_DIR + path.sep) && resolved !== WEB_DIR) {
+    json(res, 404, { error: "not_found" });
+    return;
+  }
+
+  try {
+    const data = await fs.readFile(resolved);
+    res.writeHead(200, {
+      "Content-Type": contentType,
+      "Content-Length": data.length,
+      "Cache-Control": "no-cache",
+      ...WEB_SECURITY_HEADERS,
+    });
+    res.end(data);
+  } catch {
+    json(res, 404, { error: "not_found" });
+  }
+}
 
 /**
  * Start the vault server.
@@ -154,6 +306,14 @@ export async function startServer(options = {}) {
   const port = options.port || DEFAULTS.port;
   const issuer = options.issuer || `http://localhost:${port}`;
   const adapter = getAdapter(options.dataDir);
+
+  // Load registered issuers from storage
+  const storedIssuers = await adapter.findAll("issuers");
+  if (storedIssuers.length > 0) {
+    addTrustedIssuers(storedIssuers.map((i) => i.issuer_url));
+    console.log(`Loaded ${storedIssuers.length} issuer(s) from storage`);
+  }
+
   const jwksData = await generateJwks(adapter);
 
   // Periodic session cleanup
@@ -169,8 +329,11 @@ export async function startServer(options = {}) {
   const server = http.createServer(async (req, res) => {
     const clientIp = req.socket.remoteAddress || "unknown";
 
-    // Rate limit on token endpoint
-    if (req.url?.startsWith("/token") && !checkRateLimit(clientIp)) {
+    // Rate limit on token and auth endpoints
+    if (
+      (req.url?.startsWith("/token") || req.url?.startsWith("/auth/") || req.url?.startsWith("/device/")) &&
+      !checkRateLimit(clientIp)
+    ) {
       return json(res, 429, {
         error: "too_many_requests",
         error_description: "rate limit exceeded, try again later",
@@ -341,8 +504,10 @@ export async function startServer(options = {}) {
           issuer,
           token_endpoint: `${issuer}/token`,
           jwks_uri: `${issuer}/jwks`,
+          device_authorization_endpoint: `${issuer}/device/code`,
           grant_types_supported: [
             "urn:ietf:params:oauth:grant-type:token-exchange",
+            "urn:ietf:params:oauth:grant-type:device_code",
           ],
           token_endpoint_auth_methods_supported: ["none"],
           response_types_supported: ["token"],
@@ -356,6 +521,590 @@ export async function startServer(options = {}) {
         // Always derive public keys at runtime — never trust stored publicKeys
         const pubKeys = jwksData.keys.map(stripPrivate);
         return json(res, 200, { keys: pubKeys });
+      }
+
+      // --- GET /auth/issuers ---
+      if (pathname === "/auth/issuers" && req.method === "GET") {
+        const allIssuers = await adapter.findAll("issuers");
+        const signinIssuers = allIssuers
+          .filter((i) => i.client_id)
+          .map((i) => ({ id: i.id, issuer_url: i.issuer_url }));
+        return json(res, 200, signinIssuers);
+      }
+
+      // --- GET /auth/session ---
+      if (pathname === "/auth/session" && req.method === "GET") {
+        const cookies = parseCookies(req);
+        const sessionId = cookies.opencloak_session;
+        if (sessionId) {
+          const webSession = await adapter.find("sessions", sessionId);
+          if (webSession && webSession.type === "web") {
+            const age = Date.now() - new Date(webSession.created_at).getTime();
+            if (age <= WEB_SESSION_MAX_AGE_MS) {
+              return json(res, 200, {
+                authenticated: true,
+                issuer_id: webSession.issuer_id,
+                id_token: webSession.id_token,
+                claims: webSession.claims,
+              });
+            }
+            // Expired
+            await adapter.destroy("sessions", sessionId);
+          }
+        }
+        return json(res, 200, { authenticated: false });
+      }
+
+      // --- POST /auth/logout ---
+      if (pathname === "/auth/logout" && req.method === "POST") {
+        const cookies = parseCookies(req);
+        const sessionId = cookies.opencloak_session;
+        if (sessionId) {
+          await adapter.destroy("sessions", sessionId);
+        }
+        const payload = JSON.stringify({ status: "ok" });
+        res.writeHead(200, {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(payload),
+          "Cache-Control": "no-store",
+          "Set-Cookie": clearSessionCookie(),
+          ...API_SECURITY_HEADERS,
+        });
+        res.end(payload);
+        return;
+      }
+
+      // --- GET /auth/:issuer/callback ---
+      const callbackMatch = pathname.match(/^\/auth\/([a-z0-9-]+)\/callback$/);
+      if (callbackMatch && req.method === "GET") {
+        const issuerId = callbackMatch[1];
+        const code = url.searchParams.get("code");
+        const state = url.searchParams.get("state");
+        const callbackError = url.searchParams.get("error");
+
+        if (callbackError) {
+          return redirect(res, "/#error");
+        }
+
+        if (!code || !state) {
+          return json(res, 400, {
+            error: "invalid_request",
+            error_description: "missing code or state parameter",
+          });
+        }
+
+        // Validate state format (64 hex chars = 32 bytes)
+        if (!/^[a-f0-9]{64}$/.test(state)) {
+          return json(res, 400, {
+            error: "invalid_request",
+            error_description: "malformed state parameter",
+          });
+        }
+
+        const authSession = await adapter.find("sessions", state);
+        if (!authSession || authSession.type !== "auth") {
+          return json(res, 400, {
+            error: "invalid_request",
+            error_description: "invalid or expired state parameter",
+          });
+        }
+
+        // Check auth session expiry
+        const authAge =
+          Date.now() - new Date(authSession.created_at).getTime();
+        if (authAge > SESSION_MAX_AGE_MS) {
+          await adapter.destroy("sessions", state);
+          return json(res, 400, {
+            error: "invalid_request",
+            error_description: "state parameter expired",
+          });
+        }
+
+        if (authSession.issuer_id !== issuerId) {
+          return json(res, 400, {
+            error: "invalid_request",
+            error_description: "issuer mismatch",
+          });
+        }
+
+        const issuerConfig = await adapter.find("issuers", issuerId);
+        if (!issuerConfig || !issuerConfig.client_id) {
+          return json(res, 400, {
+            error: "invalid_request",
+            error_description: "issuer not configured for sign-in",
+          });
+        }
+
+        try {
+          // Fetch discovery doc
+          const discoveryUrl = `${issuerConfig.issuer_url.replace(/\/$/, "")}/.well-known/openid-configuration`;
+          const discovery = await fetchJson(discoveryUrl, true);
+
+          if (!discovery.token_endpoint) {
+            throw new Error("missing token_endpoint in discovery");
+          }
+
+          // Exchange code for tokens
+          const tokenBody = new URLSearchParams({
+            grant_type: "authorization_code",
+            code,
+            redirect_uri: `${issuer}/auth/${issuerId}/callback`,
+            client_id: issuerConfig.client_id,
+            client_secret: issuerConfig.client_secret,
+            code_verifier: authSession.code_verifier,
+          });
+
+          const tokenRes = await fetch(discovery.token_endpoint, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/x-www-form-urlencoded",
+            },
+            body: tokenBody,
+          });
+
+          if (!tokenRes.ok) {
+            const errBody = await tokenRes.text();
+            console.error("Token exchange failed:", tokenRes.status, errBody);
+            return redirect(res, "/#error");
+          }
+
+          const tokenData = await tokenRes.json();
+          const idToken = tokenData.id_token;
+          if (!idToken) {
+            return redirect(res, "/#error");
+          }
+
+          // Decode id_token payload (for display; real verification happens at /token endpoint)
+          const payloadB64 = idToken.split(".")[1];
+          const claims = JSON.parse(
+            Buffer.from(payloadB64, "base64url").toString("utf-8")
+          );
+
+          // Validate nonce
+          if (claims.nonce !== authSession.nonce) {
+            await adapter.destroy("sessions", state);
+            return json(res, 400, {
+              error: "invalid_request",
+              error_description: "nonce mismatch",
+            });
+          }
+
+          // Create web session
+          const webSessionId = crypto.randomBytes(32).toString("hex");
+          await adapter.upsert("sessions", webSessionId, {
+            type: "web",
+            issuer_id: issuerId,
+            id_token: idToken,
+            claims,
+            created_at: new Date().toISOString(),
+          });
+
+          // Delete auth session
+          await adapter.destroy("sessions", state);
+
+          // Set cookie and redirect
+          return redirect(
+            res,
+            "/#signed-in",
+            buildSessionCookie(webSessionId, issuer)
+          );
+        } catch (err) {
+          console.error("OIDC callback error:", err);
+          return redirect(res, "/#error");
+        }
+      }
+
+      // --- GET /auth/:issuer — Start OIDC flow ---
+      const authMatch = pathname.match(/^\/auth\/([a-z0-9-]+)$/);
+      if (authMatch && req.method === "GET") {
+        const issuerId = authMatch[1];
+
+        const issuerConfig = await adapter.find("issuers", issuerId);
+        if (!issuerConfig || !issuerConfig.client_id) {
+          return json(res, 404, {
+            error: "not_found",
+            error_description: "issuer not found or not configured for sign-in",
+          });
+        }
+
+        try {
+          // Fetch OIDC discovery doc
+          const discoveryUrl = `${issuerConfig.issuer_url.replace(/\/$/, "")}/.well-known/openid-configuration`;
+          const discovery = await fetchJson(discoveryUrl, true);
+
+          if (!discovery.authorization_endpoint) {
+            throw new Error("missing authorization_endpoint in discovery");
+          }
+
+          // Generate state, nonce, PKCE
+          const state = crypto.randomBytes(32).toString("hex");
+          const nonce = crypto.randomBytes(16).toString("hex");
+          const pkce = generatePKCE();
+
+          // Store auth session
+          await adapter.upsert("sessions", state, {
+            type: "auth",
+            issuer_id: issuerId,
+            nonce,
+            code_verifier: pkce.verifier,
+            created_at: new Date().toISOString(),
+          });
+
+          // Build authorization URL
+          const authUrl = new URL(discovery.authorization_endpoint);
+          authUrl.searchParams.set("response_type", "code");
+          authUrl.searchParams.set("client_id", issuerConfig.client_id);
+          authUrl.searchParams.set(
+            "redirect_uri",
+            `${issuer}/auth/${issuerId}/callback`
+          );
+          authUrl.searchParams.set("scope", "openid email profile");
+          authUrl.searchParams.set("state", state);
+          authUrl.searchParams.set("nonce", nonce);
+          authUrl.searchParams.set("code_challenge", pkce.challenge);
+          authUrl.searchParams.set("code_challenge_method", "S256");
+
+          return redirect(res, authUrl.toString());
+        } catch (err) {
+          console.error("OIDC start error:", err);
+          return json(res, 500, {
+            error: "server_error",
+            error_description: "an internal error occurred",
+          });
+        }
+      }
+
+      // --- Device Authorization Flow (RFC 8628) ---
+
+      // POST /device/code — Agent starts device flow
+      if (pathname === "/device/code" && req.method === "POST") {
+        const body = await parseBody(req).catch(() => ({}));
+        const issuerId = body.issuer_id || null;
+
+        // If issuer_id specified, verify it exists
+        if (issuerId) {
+          const issuerConfig = await adapter.find("issuers", issuerId);
+          if (!issuerConfig || !issuerConfig.client_id) {
+            return json(res, 400, {
+              error: "invalid_request",
+              error_description: "unknown or unconfigured issuer",
+            });
+          }
+        }
+
+        const deviceCode = crypto.randomBytes(32).toString("hex");
+
+        // Generate unique user code
+        let userCode;
+        for (let attempts = 0; attempts < 10; attempts++) {
+          userCode = generateUserCode();
+          const normalized = normalizeUserCode(userCode);
+          // Check uniqueness among active device sessions
+          const allSessions = await adapter.findAll("sessions");
+          const conflict = allSessions.some(
+            (s) => s.type === "device" && s.status === "pending" && normalizeUserCode(s.user_code) === normalized
+          );
+          if (!conflict) break;
+          if (attempts === 9) {
+            return json(res, 503, {
+              error: "server_error",
+              error_description: "could not generate unique user code, try again",
+            });
+          }
+        }
+
+        await adapter.upsert("sessions", deviceCode, {
+          type: "device",
+          user_code: userCode,
+          status: "pending",
+          issuer_id: issuerId,
+          id_token: null,
+          claims: null,
+          last_poll: null,
+          created_at: new Date().toISOString(),
+        });
+
+        const verificationUri = `${issuer}/device/verify`;
+        return json(res, 200, {
+          device_code: deviceCode,
+          user_code: userCode,
+          verification_uri: verificationUri,
+          verification_uri_complete: `${verificationUri}?code=${encodeURIComponent(userCode)}`,
+          expires_in: 600,
+          interval: 5,
+        });
+      }
+
+      // GET /device/verify — Serves code entry page
+      if (pathname === "/device/verify" && req.method === "GET") {
+        return serveStaticFile(res, path.join(WEB_DIR, "device.html"));
+      }
+
+      // POST /device/verify — Human submits code
+      if (pathname === "/device/verify" && req.method === "POST") {
+        const body = await parseBody(req);
+        const rawCode = body.user_code;
+        if (!rawCode) {
+          return htmlPage(res, 400, "Error", `<div class="card"><h2>Missing Code</h2><p>Please enter a device code.</p><div class="actions"><a href="/device/verify" class="btn btn-primary">Try Again</a></div></div>`);
+        }
+
+        const normalized = normalizeUserCode(rawCode);
+        if (normalized.length !== 8) {
+          return htmlPage(res, 400, "Error", `<div class="card"><h2>Invalid Code</h2><p>The code should be 8 characters (XXXX-XXXX).</p><div class="actions"><a href="/device/verify" class="btn btn-primary">Try Again</a></div></div>`);
+        }
+
+        // Find matching pending device session
+        const allSessions = await adapter.findAll("sessions");
+        const deviceSession = allSessions.find(
+          (s) => s.type === "device" && s.status === "pending" && normalizeUserCode(s.user_code) === normalized
+        );
+
+        if (!deviceSession) {
+          return htmlPage(res, 400, "Error", `<div class="card"><h2>Code Not Found</h2><p>No pending authorization matches that code. It may have expired.</p><div class="actions"><a href="/device/verify" class="btn btn-primary">Try Again</a></div></div>`);
+        }
+
+        // Check device session expiry
+        const deviceAge = Date.now() - new Date(deviceSession.created_at).getTime();
+        if (deviceAge > SESSION_MAX_AGE_MS) {
+          return htmlPage(res, 400, "Error", `<div class="card"><h2>Code Expired</h2><p>This code has expired. Please request a new one from your agent.</p></div>`);
+        }
+
+        // Determine issuer — if pre-selected or only one available
+        let targetIssuerId = deviceSession.issuer_id || body.issuer_id;
+        if (!targetIssuerId) {
+          const allIssuers = await adapter.findAll("issuers");
+          const signinIssuers = allIssuers.filter((i) => i.client_id);
+          if (signinIssuers.length === 0) {
+            return htmlPage(res, 500, "Error", `<div class="card"><h2>No Issuers</h2><p>No sign-in providers are configured.</p></div>`);
+          }
+          if (signinIssuers.length === 1) {
+            targetIssuerId = signinIssuers[0].id;
+          } else {
+            // Render issuer selection
+            const buttons = signinIssuers.map(
+              (i) => `<form method="POST" action="/device/verify" style="margin:0"><input type="hidden" name="user_code" value="${rawCode}"><input type="hidden" name="issuer_id" value="${i.id}"><button type="submit" class="signin-btn">${i.id}</button></form>`
+            ).join("");
+            return htmlPage(res, 200, "Choose Provider", `<div class="card"><h2>Choose Sign-In Provider</h2><p>Code: <strong>${deviceSession.user_code}</strong></p><div class="signin-buttons">${buttons}</div></div>`);
+          }
+        }
+
+        const issuerConfig = await adapter.find("issuers", targetIssuerId);
+        if (!issuerConfig || !issuerConfig.client_id) {
+          return htmlPage(res, 400, "Error", `<div class="card"><h2>Invalid Provider</h2><p>The selected sign-in provider is not configured.</p></div>`);
+        }
+
+        try {
+          const discoveryUrl = `${issuerConfig.issuer_url.replace(/\/$/, "")}/.well-known/openid-configuration`;
+          const discovery = await fetchJson(discoveryUrl, true);
+          if (!discovery.authorization_endpoint) {
+            throw new Error("missing authorization_endpoint in discovery");
+          }
+
+          const state = crypto.randomBytes(32).toString("hex");
+          const nonce = crypto.randomBytes(16).toString("hex");
+          const pkce = generatePKCE();
+
+          // Store auth session linked to device session
+          await adapter.upsert("sessions", state, {
+            type: "auth",
+            issuer_id: targetIssuerId,
+            nonce,
+            code_verifier: pkce.verifier,
+            device_session_id: deviceSession.id,
+            created_at: new Date().toISOString(),
+          });
+
+          const authUrl = new URL(discovery.authorization_endpoint);
+          authUrl.searchParams.set("response_type", "code");
+          authUrl.searchParams.set("client_id", issuerConfig.client_id);
+          authUrl.searchParams.set("redirect_uri", `${issuer}/device/callback/${targetIssuerId}`);
+          authUrl.searchParams.set("scope", "openid email profile");
+          authUrl.searchParams.set("state", state);
+          authUrl.searchParams.set("nonce", nonce);
+          authUrl.searchParams.set("code_challenge", pkce.challenge);
+          authUrl.searchParams.set("code_challenge_method", "S256");
+
+          return redirect(res, authUrl.toString());
+        } catch (err) {
+          console.error("Device verify OIDC error:", err);
+          return htmlPage(res, 500, "Error", `<div class="card"><h2>Error</h2><p>Failed to start sign-in. Please try again.</p></div>`);
+        }
+      }
+
+      // GET /device/callback/:issuer — OIDC callback for device flow
+      const deviceCallbackMatch = pathname.match(/^\/device\/callback\/([a-z0-9-]+)$/);
+      if (deviceCallbackMatch && req.method === "GET") {
+        const issuerId = deviceCallbackMatch[1];
+        const code = url.searchParams.get("code");
+        const state = url.searchParams.get("state");
+        const callbackError = url.searchParams.get("error");
+
+        if (callbackError) {
+          return htmlPage(res, 400, "Error", `<div class="card"><h2>Authorization Denied</h2><p>The sign-in provider denied the request.</p></div>`);
+        }
+
+        if (!code || !state) {
+          return htmlPage(res, 400, "Error", `<div class="card"><h2>Invalid Request</h2><p>Missing code or state parameter.</p></div>`);
+        }
+
+        if (!/^[a-f0-9]{64}$/.test(state)) {
+          return htmlPage(res, 400, "Error", `<div class="card"><h2>Invalid Request</h2><p>Malformed state parameter.</p></div>`);
+        }
+
+        const authSession = await adapter.find("sessions", state);
+        if (!authSession || authSession.type !== "auth" || !authSession.device_session_id) {
+          return htmlPage(res, 400, "Error", `<div class="card"><h2>Invalid Request</h2><p>Invalid or expired session.</p></div>`);
+        }
+
+        const authAge = Date.now() - new Date(authSession.created_at).getTime();
+        if (authAge > SESSION_MAX_AGE_MS) {
+          await adapter.destroy("sessions", state);
+          return htmlPage(res, 400, "Error", `<div class="card"><h2>Session Expired</h2><p>The authorization session has expired. Please try again.</p></div>`);
+        }
+
+        if (authSession.issuer_id !== issuerId) {
+          return htmlPage(res, 400, "Error", `<div class="card"><h2>Issuer Mismatch</h2><p>Unexpected provider callback.</p></div>`);
+        }
+
+        const issuerConfig = await adapter.find("issuers", issuerId);
+        if (!issuerConfig || !issuerConfig.client_id) {
+          return htmlPage(res, 500, "Error", `<div class="card"><h2>Configuration Error</h2><p>Issuer not configured for sign-in.</p></div>`);
+        }
+
+        try {
+          const discoveryUrl = `${issuerConfig.issuer_url.replace(/\/$/, "")}/.well-known/openid-configuration`;
+          const discovery = await fetchJson(discoveryUrl, true);
+          if (!discovery.token_endpoint) {
+            throw new Error("missing token_endpoint in discovery");
+          }
+
+          const tokenBody = new URLSearchParams({
+            grant_type: "authorization_code",
+            code,
+            redirect_uri: `${issuer}/device/callback/${issuerId}`,
+            client_id: issuerConfig.client_id,
+            client_secret: issuerConfig.client_secret,
+            code_verifier: authSession.code_verifier,
+          });
+
+          const tokenRes = await fetch(discovery.token_endpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: tokenBody,
+          });
+
+          if (!tokenRes.ok) {
+            const errBody = await tokenRes.text();
+            console.error("Device callback token exchange failed:", tokenRes.status, errBody);
+            return htmlPage(res, 500, "Error", `<div class="card"><h2>Sign-In Failed</h2><p>Could not complete the sign-in. Please try again.</p></div>`);
+          }
+
+          const tokenData = await tokenRes.json();
+          const idToken = tokenData.id_token;
+          if (!idToken) {
+            return htmlPage(res, 500, "Error", `<div class="card"><h2>Sign-In Failed</h2><p>No ID token received from provider.</p></div>`);
+          }
+
+          // Decode and validate nonce
+          const payloadB64 = idToken.split(".")[1];
+          const claims = JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf-8"));
+
+          if (claims.nonce !== authSession.nonce) {
+            await adapter.destroy("sessions", state);
+            return htmlPage(res, 400, "Error", `<div class="card"><h2>Security Error</h2><p>Nonce mismatch. Please try again.</p></div>`);
+          }
+
+          // Update device session to authorized
+          const deviceSession = await adapter.find("sessions", authSession.device_session_id);
+          if (deviceSession && deviceSession.type === "device") {
+            await adapter.upsert("sessions", authSession.device_session_id, {
+              ...deviceSession,
+              status: "authorized",
+              id_token: idToken,
+              claims,
+            });
+          }
+
+          // Delete auth session
+          await adapter.destroy("sessions", state);
+
+          return redirect(res, "/device/complete");
+        } catch (err) {
+          console.error("Device callback error:", err);
+          return htmlPage(res, 500, "Error", `<div class="card"><h2>Error</h2><p>An unexpected error occurred.</p></div>`);
+        }
+      }
+
+      // GET /device/complete — Success page
+      if (pathname === "/device/complete" && req.method === "GET") {
+        return serveStaticFile(res, path.join(WEB_DIR, "device-complete.html"));
+      }
+
+      // GET /device/token — Agent polls for result
+      if (pathname === "/device/token" && req.method === "GET") {
+        const deviceCode = url.searchParams.get("device_code");
+        if (!deviceCode || !/^[a-f0-9]{64}$/.test(deviceCode)) {
+          return json(res, 400, { error: "invalid_request", error_description: "missing or malformed device_code" });
+        }
+
+        const deviceSession = await adapter.find("sessions", deviceCode);
+        if (!deviceSession || deviceSession.type !== "device") {
+          return json(res, 400, { error: "expired_token", error_description: "device code not found or expired" });
+        }
+
+        // Check expiry
+        const deviceAge = Date.now() - new Date(deviceSession.created_at).getTime();
+        if (deviceAge > SESSION_MAX_AGE_MS) {
+          await adapter.destroy("sessions", deviceCode);
+          return json(res, 400, { error: "expired_token", error_description: "device code expired" });
+        }
+
+        // Enforce polling interval
+        const now = Date.now();
+        if (deviceSession.last_poll && now - new Date(deviceSession.last_poll).getTime() < DEVICE_POLL_INTERVAL_MS) {
+          return json(res, 400, { error: "slow_down", error_description: "polling too frequently" });
+        }
+
+        // Update last_poll
+        await adapter.upsert("sessions", deviceCode, {
+          ...deviceSession,
+          last_poll: new Date().toISOString(),
+        });
+
+        if (deviceSession.status === "pending") {
+          return json(res, 400, { error: "authorization_pending", error_description: "waiting for user authorization" });
+        }
+
+        if (deviceSession.status === "authorized" && deviceSession.id_token) {
+          const result = { id_token: deviceSession.id_token, claims: deviceSession.claims };
+          // One-time retrieval — destroy session
+          await adapter.destroy("sessions", deviceCode);
+          return json(res, 200, result);
+        }
+
+        return json(res, 400, { error: "authorization_pending", error_description: "waiting for user authorization" });
+      }
+
+      // --- Static file serving ---
+      if (req.method === "GET") {
+        if (pathname === "/") {
+          return serveStaticFile(res, path.join(WEB_DIR, "index.html"));
+        }
+        if (pathname.startsWith("/web/")) {
+          const relPath = pathname.slice(5); // strip "/web/"
+          // Prevent empty path or directory traversal
+          if (
+            !relPath ||
+            relPath.includes("..") ||
+            relPath.includes("\0")
+          ) {
+            return json(res, 404, { error: "not_found" });
+          }
+          return serveStaticFile(
+            res,
+            path.join(WEB_DIR, relPath)
+          );
+        }
       }
 
       // --- 404 ---
@@ -374,6 +1123,8 @@ export async function startServer(options = {}) {
     console.log(`OpenCloak vault listening on ${issuer}`);
     console.log(`  Token exchange: POST ${issuer}/token`);
     console.log(`  Health check:   GET  ${issuer}/health`);
+    console.log(`  Device auth:    POST ${issuer}/device/code`);
+    console.log(`  Demo UI:        GET  ${issuer}/`);
   });
 
   return { server, adapter };

@@ -32,7 +32,7 @@ export async function handleTokenExchange(params, adapter) {
     return error(400, "invalid_request", "resource is required");
   }
 
-  // --- 1. Verify actor token (tsidp OIDC) ---
+  // --- 1. Verify actor token (OIDC) ---
   let identity;
   try {
     identity = await verifyActorToken(actor_token, actor_token_type);
@@ -41,7 +41,7 @@ export async function handleTokenExchange(params, adapter) {
     return error(401, "invalid_grant", "actor_token verification failed");
   }
 
-  // --- 2. Look up agent by Tailscale identity ---
+  // --- 2. Look up agent by identity ---
   const agent = await findAgentByIdentity(adapter, identity.sub);
   if (!agent) {
     return error(403, "invalid_grant", "agent not authorized");

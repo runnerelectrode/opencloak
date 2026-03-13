@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Device Authorization — OpenCloak</title>
+  <link rel="stylesheet" href="/web/style.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>OpenCloak</h1>
+      <p>Enter the code shown by your agent</p>
+    </header>
+
+    <div class="card">
+      <h2>Device Authorization</h2>
+      <form method="POST" action="/device/verify">
+        <div class="code-input-group">
+          <input
+            type="text"
+            name="user_code"
+            id="code-input"
+            class="code-input"
+            placeholder="XXXX-XXXX"
+            maxlength="9"
+            autocomplete="off"
+            autocapitalize="characters"
+            spellcheck="false"
+            required
+          >
+        </div>
+        <div class="actions" style="justify-content: center; margin-top: 1.25rem;">
+          <button type="submit" class="btn btn-primary">Submit Code</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    // Pre-fill from ?code= query parameter
+    const params = new URLSearchParams(window.location.search);
+    const codeParam = params.get("code");
+    const input = document.getElementById("code-input");
+    if (codeParam) {
+      input.value = codeParam;
+    }
+
+    // Auto-format: uppercase + insert hyphen after 4th char
+    input.addEventListener("input", function () {
+      let v = this.value.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+      if (v.length > 8) v = v.slice(0, 8);
+      if (v.length > 4) v = v.slice(0, 4) + "-" + v.slice(4);
+      this.value = v;
+    });
+  </script>
+</body>
+</html>

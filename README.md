@@ -4,98 +4,75 @@
 
 <p align="center">
   Open-source OAuth vault for AI agents. Built for <a href="https://github.com/runnerelectrode/openclaw">OpenClaw</a>.<br>
-  RFC 8693 token exchange via Tailscale identity.
+  RFC 8693 token exchange · RFC 8628 device authorization · Pluggable OIDC identity.
 </p>
 
-OpenClaw (or any AI agent on your tailnet) proves who it is with a Tailscale tsidp OIDC token. OpenCloak checks policy and returns a scoped, short-lived access token for third-party APIs (Discord, GitHub, Google, Slack). Your agent never sees or stores long-lived credentials.
+Any AI agent proves who it is with a standard OIDC token (Google, Okta, Auth0, Azure AD, or any compliant provider). OpenCloak checks policy and returns a scoped, short-lived access token for third-party APIs (Discord, GitHub, Google, Slack). Your agent never sees or stores long-lived credentials.
 
 **Zero external dependencies.** Pure Node.js 18+.
+
+## How It Works
+
+```
+┌──────────────┐     1      ┌──────────────┐     3      ┌──────────────┐
+│   AI Agent   │ ──────────>│  OpenCloak   │ ──────────>│   Discord    │
+│              │ <──────────│  (the vault) │ <──────────│     API      │
+└──────────────┘     2      └──────────────┘     4      └──────────────┘
+       │                          ▲
+       │                          │
+       └──────────────────────────┘
+       │
+       ▼
+┌──────────────┐
+│    OIDC      │
+│  Provider    │
+│  (identity)  │
+└──────────────┘
+```
+
+| Step | Who | Does what |
+|------|-----|-----------|
+| 1 | Agent → OIDC Provider | "Give me an identity token" (Google, Okta, etc.) |
+| 2 | Agent → OpenCloak | "Here's my identity proof, give me Discord access" (`POST /token`, RFC 8693) |
+| 3 | OpenCloak | Verifies identity, checks policy, returns scoped token |
+| 4 | Agent → Discord | Uses the scoped token OpenCloak returned |
+
+The agent never sees your Discord OAuth credentials. It only gets back what OpenCloak's policy allows.
+
+## Device Authorization Flow (RFC 8628)
+
+For headless AI agents that can't open a browser (e.g. agents running in [Daytona](https://www.daytona.io/) sandboxes), OpenCloak implements the OAuth 2.0 Device Authorization Grant:
+
+```
+Agent (headless sandbox)            Human (browser, any device)
+────────────────────────            ──────────────────────────
+POST /device/code
+  ← device_code, user_code
+  ← "BCDF-GH34"
+
+prints: "Enter code: BCDF-GH34"
+                                    Opens URL, enters code
+                                    Signs in with Google
+                                    ← "Authorization complete"
+
+GET /device/token (polling)
+  ← { id_token, claims }
+
+POST /token (RFC 8693 exchange)
+  ← scoped Discord webhook credential
+```
+
+The agent gets a short code, the human enters it on any device and signs in with their identity provider. The agent polls until it gets the `id_token`, then exchanges it for scoped API credentials via RFC 8693.
 
 ## Prerequisites
 
 - **Node.js 18+** installed
-- **Tailscale** installed with your node joined to a tailnet, MagicDNS and HTTPS enabled
-- **tsidp** running on your tailnet (see setup below)
-- A **Discord Developer Application** (or other OAuth provider) with client ID and secret
+- **An OIDC identity provider** (Google, Okta, Auth0, Azure AD, etc.)
+- A **third-party API** to delegate access to (Discord, GitHub, etc.)
 
-## Setting Up tsidp (Tailscale Identity Provider)
+## Quick Start
 
-tsidp is Tailscale's OIDC identity provider that issues tokens based on your tailnet identity. OpenCloak uses these tokens to verify which agent is making a request.
-
-### Option A: Docker (recommended)
-
-Create a `compose.yaml`:
-
-```yaml
-services:
-  tsidp:
-    container_name: tsidp
-    image: ghcr.io/tailscale/tsidp:latest
-    volumes:
-      - tsidp-data:/data
-    environment:
-      - TAILSCALE_USE_WIP_CODE=1
-      - TS_STATE_DIR=/data
-      - TS_HOSTNAME=idp
-      - TS_AUTHKEY=tskey-auth-xxxxx  # from Tailscale admin console
-volumes:
-  tsidp-data:
-```
-
-```bash
-docker compose up -d
-```
-
-### Option B: From source (requires Go)
-
-```bash
-git clone https://github.com/tailscale/tsidp.git
-cd tsidp
-TAILSCALE_USE_WIP_CODE=1 go run . -hostname idp -dir ./data
-```
-
-### Configure access grants
-
-In the Tailscale admin console (Access Controls), add a grant so your nodes can get tokens from tsidp:
-
-```json
-"grants": [
-  {
-    "src": ["*"],
-    "dst": ["tag:idp"],
-    "app": {
-      "tailscale.com/cap/tsidp": [
-        {
-          "allow_admin_ui": true,
-          "allow_dcr": true,
-          "users": ["*"],
-          "resources": ["*"]
-        }
-      ]
-    }
-  }
-]
-```
-
-### Verify tsidp is running
-
-Once started, tsidp is available at `https://idp.<your-tailnet>.ts.net`. Verify with:
-
-```bash
-curl https://idp.<your-tailnet>.ts.net/.well-known/openid-configuration
-```
-
-You should see an OIDC discovery document with `issuer`, `token_endpoint`, `jwks_uri`, etc.
-
-### Getting a token from tsidp
-
-Agents obtain OIDC tokens by authenticating through tsidp's standard OIDC flow. The token's `sub` claim contains the Tailscale identity (user email or device tag) — this is what OpenCloak uses to identify the agent.
-
-The issuer will be `https://idp.<your-tailnet>.ts.net`, which matches OpenCloak's trusted issuer pattern (`*.ts.net`).
-
-## Step-by-Step Setup
-
-### Step 1: Clone and install
+### 1. Clone and install
 
 ```bash
 git clone https://github.com/runnerelectrode/opencloak.git
@@ -103,23 +80,31 @@ cd opencloak
 npm install
 ```
 
-### Step 2: Start the vault server
+### 2. Start the vault server
 
 ```bash
 node cli.mjs start --port 3422
 ```
 
-The vault starts on `http://localhost:3422`. You'll see:
+### 3. Register an identity provider
 
+```bash
+node cli.mjs add-issuer google \
+  --issuer-url https://accounts.google.com \
+  --audience YOUR_GOOGLE_CLIENT_ID
 ```
-OpenCloak vault listening on http://localhost:3422
-  Token exchange: POST http://localhost:3422/token
-  Health check:   GET  http://localhost:3422/health
+
+For device flow (headless agents), also pass the Google OAuth client credentials:
+
+```bash
+node cli.mjs add-issuer google \
+  --issuer-url https://accounts.google.com \
+  --audience YOUR_GOOGLE_CLIENT_ID \
+  --client-id YOUR_GOOGLE_CLIENT_ID \
+  --client-secret YOUR_GOOGLE_CLIENT_SECRET
 ```
 
-### Step 3: Register an OAuth provider
-
-Create a Discord application at https://discord.com/developers/applications, then:
+### 4. Register an OAuth provider
 
 ```bash
 node cli.mjs add-provider discord \
@@ -127,236 +112,154 @@ node cli.mjs add-provider discord \
   --client-secret <YOUR_DISCORD_CLIENT_SECRET>
 ```
 
-Set the redirect URI in your Discord app settings to:
-- Local dev: `http://localhost:3422/oauth/callback/discord`
-- Tailnet: `https://<your-node>.<tailnet>.ts.net/oauth/callback/discord`
-
-### Step 4: Register an agent
-
-Register an agent by its Tailscale identity (the `sub` claim from tsidp — either a user email or a device tag):
+### 5. Register an agent and set policy
 
 ```bash
-node cli.mjs register-agent --ts-identity user@example.com
+node cli.mjs register-agent --identity user@example.com
+node cli.mjs policy set user@example.com discord --scopes "webhook.incoming"
 ```
 
-### Step 5: Set agent permissions
-
-Define what scopes the agent is allowed to request:
+### 6. Connect your account (one-time, human-in-the-loop)
 
 ```bash
-node cli.mjs policy set user@example.com discord --scopes "identify,guilds"
+node cli.mjs connect discord --scopes "webhook.incoming"
 ```
 
-### Step 6: Connect your account (one-time, human-in-the-loop)
-
-As the account owner, run:
-
-```bash
-node cli.mjs connect discord --scopes "identify guilds"
-```
-
-This prints an authorization URL. Open it in your browser, authorize the app, and Discord redirects back to the vault's callback endpoint. The vault stores your refresh token securely.
-
-### Step 7: Agent performs token exchange
-
-The agent sends an RFC 8693 token exchange request, presenting its Tailscale OIDC token:
+### 7. Agent performs token exchange
 
 ```bash
 curl -X POST http://localhost:3422/token \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -d "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \
-  -d "actor_token=<TSIDP_OIDC_TOKEN>" \
-  -d "actor_token_type=urn:ietf:params:oauth:token-type:id_token" \
-  -d "resource=https://discord.com/api" \
-  -d "scope=identify"
-```
-
-The vault verifies the agent's identity, checks policy, refreshes the provider token, and returns:
-
-```json
-{
-  "access_token": "<scoped_discord_access_token>",
-  "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
-  "token_type": "Bearer",
-  "expires_in": 604800,
-  "scope": "identify"
-}
-```
-
-### Step 8: Agent uses the token
-
-```bash
-curl -H "Authorization: Bearer <access_token>" \
-  https://discord.com/api/v10/users/@me
-```
-
-## Discord Webhook Mode (Least-Privilege)
-
-For agents that only need to post messages, use webhook mode — no broad bot permissions needed:
-
-```bash
-# Set policy
-node cli.mjs policy set user@example.com discord --scopes "webhook.incoming"
-
-# Connect with webhook scope
-node cli.mjs connect discord --scopes "webhook.incoming"
-
-# Agent exchanges for webhook credentials
-curl -X POST http://localhost:3422/token \
-  -d "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \
-  -d "actor_token=<TSIDP_OIDC_TOKEN>" \
+  -d "actor_token=<OIDC_TOKEN>" \
   -d "actor_token_type=urn:ietf:params:oauth:token-type:id_token" \
   -d "resource=https://discord.com/api" \
   -d "scope=webhook.incoming"
+```
 
-# Post a message via the returned webhook URL
-curl -X POST <webhook_url> \
-  -H "Content-Type: application/json" \
-  -d '{"content": "Hello from OpenClaw via OpenCloak!"}'
+## Device Flow for Headless Agents
+
+When an agent can't open a browser (sandboxed, headless, CI/CD), use the device flow:
+
+```javascript
+// 1. Agent requests a device code
+const codeRes = await fetch("https://vault.example.com/device/code", {
+  method: "POST",
+  headers: { "Content-Type": "application/x-www-form-urlencoded" },
+  body: "issuer_id=google",
+});
+const { device_code, user_code, verification_uri_complete } = await codeRes.json();
+
+console.log(`Enter code ${user_code} at ${verification_uri_complete}`);
+
+// 2. Poll until the human signs in
+let idToken;
+while (!idToken) {
+  await new Promise(r => setTimeout(r, 5000));
+  const pollRes = await fetch(`https://vault.example.com/device/token?device_code=${device_code}`);
+  const data = await pollRes.json();
+  if (data.id_token) idToken = data.id_token;
+  if (data.error === "expired_token") throw new Error("Code expired");
+}
+
+// 3. Exchange id_token for scoped credentials
+const tokenRes = await fetch("https://vault.example.com/token", {
+  method: "POST",
+  headers: { "Content-Type": "application/x-www-form-urlencoded" },
+  body: new URLSearchParams({
+    grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
+    actor_token: idToken,
+    actor_token_type: "urn:ietf:params:oauth:token-type:id_token",
+    resource: "https://discord.com/api",
+    scope: "webhook.incoming",
+  }),
+});
+const { webhook_url } = await tokenRes.json();
+
+// 4. Use the credential — agent never had Discord secrets
+await fetch(webhook_url, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ content: "Hello from a headless agent!" }),
+});
 ```
 
 ## Running in Daytona
 
-OpenCloak runs inside a [Daytona](https://github.com/daytonaio/daytona) sandbox as a secrets vault. Your agent never sees OAuth credentials — it asks OpenCloak for scoped tokens at runtime.
+OpenCloak works with [Daytona](https://www.daytona.io/) sandboxes. The agent runs inside a headless sandbox, authenticates via the device flow, and gets scoped credentials — without any secrets in its environment.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                    Daytona Sandbox                       │
 │                                                         │
-│   ┌────────────┐         ┌──────────────┐               │
-│   │  OpenClaw  │ ──────> │  OpenCloak   │──────────┐    │
-│   │  (agent)   │ <────── │  (vault)     │<─────┐   │    │
-│   └────────────┘         └──────────────┘      │   │    │
-│         │                                      │   │    │
-└─────────│──────────────────────────────────────│───│────┘
-          │                                      │   │
-          ▼                                      │   ▼
-   ┌──────────────┐                        ┌──────────────┐
-   │  GitHub API  │                        │  Discord API │
-   │  Slack API   │                        │  Google API  │
-   └──────────────┘                        └──────────────┘
+│   ┌────────────┐                                        │
+│   │  OpenClaw  │─── POST /device/code ──────────────┐   │
+│   │  (agent)   │─── GET  /device/token (poll) ──┐   │   │
+│   │            │─── POST /token (exchange) ──┐  │   │   │
+│   └────────────┘                             │  │   │   │
+│                                              │  │   │   │
+└──────────────────────────────────────────────│──│───│───┘
+                                               │  │   │
+                                               ▼  ▼   ▼
+                                        ┌──────────────┐
+                                        │  OpenCloak   │
+                                        │  (vault)     │
+                                        └──────┬───────┘
+                                               │
+                            ┌──────────────────┼──────────────────┐
+                            ▼                  ▼                  ▼
+                     ┌────────────┐    ┌────────────┐    ┌────────────┐
+                     │  Google    │    │  Discord   │    │  GitHub    │
+                     │  (OIDC)   │    │  (API)     │    │  (API)     │
+                     └────────────┘    └────────────┘    └────────────┘
 ```
 
-### Quick start
+### Daytona Demo
 
-**1. Create a sandbox and install OpenCloak:**
+The `examples/daytona/device-flow-demo.mjs` script runs the full flow end-to-end:
 
-```python
-from daytona import Daytona, DaytonaConfig
+1. Creates a Daytona sandbox
+2. Agent in sandbox calls `POST /device/code` → gets a short code
+3. You sign in with Google in your browser
+4. Agent polls `GET /device/token` → gets `id_token`
+5. Agent calls `POST /token` (RFC 8693) → gets Discord webhook credential
+6. Agent posts a message to Discord
 
-daytona = Daytona(DaytonaConfig(api_key="YOUR_DAYTONA_API_KEY"))
-sandbox = daytona.create()
+```bash
+export DAYTONA_API_KEY=your_key
+export DAYTONA_API_URL=https://app.daytona.io/api
+export HEROKU_API_KEY=your_heroku_key
 
-# Install OpenCloak inside the sandbox
-sandbox.process.execute_command(
-    "git clone https://github.com/runnerelectrode/opencloak.git /home/daytona/opencloak"
-)
-
-# Start the vault server
-sandbox.process.execute_command(
-    "cd /home/daytona/opencloak && node cli.mjs start --data-dir /home/daytona/vault-data --port 3422 &"
-)
+node examples/daytona/device-flow-demo.mjs
 ```
 
-**2. Configure providers from inside the sandbox:**
-
-```python
-# Register GitHub as a provider
-sandbox.process.execute_command(
-    "cd /home/daytona/opencloak && node cli.mjs add-provider github "
-    "--client-id YOUR_GITHUB_CLIENT_ID "
-    "--client-secret YOUR_GITHUB_CLIENT_SECRET "
-    "--authorize-url https://github.com/login/oauth/authorize "
-    "--token-url https://github.com/login/oauth/access_token "
-    "--resource-uri https://api.github.com "
-    "--data-dir /home/daytona/vault-data"
-)
-
-# Register the agent and set policy
-sandbox.process.execute_command(
-    f"cd /home/daytona/opencloak && node cli.mjs register-agent "
-    f"--ts-identity sandbox:{sandbox.id} "
-    f"--data-dir /home/daytona/vault-data"
-)
-
-sandbox.process.execute_command(
-    f"cd /home/daytona/opencloak && node cli.mjs policy set "
-    f"sandbox:{sandbox.id} github --scopes repo,read:user "
-    f"--data-dir /home/daytona/vault-data"
-)
-```
-
-**3. Connect your account (one-time, human-in-the-loop):**
-
-```python
-# This prints an authorization URL — open it in your browser
-response = sandbox.process.execute_command(
-    "cd /home/daytona/opencloak && node cli.mjs connect github "
-    "--scopes 'repo read:user' "
-    "--data-dir /home/daytona/vault-data"
-)
-print(response.result)  # Open this URL in your browser to authorize
-```
-
-**4. Agent requests tokens at runtime (no credentials exposed):**
-
-```javascript
-// This runs inside the sandbox — the agent's code
-const response = await fetch("http://localhost:3422/token", {
-  method: "POST",
-  headers: { "Content-Type": "application/x-www-form-urlencoded" },
-  body: new URLSearchParams({
-    grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
-    actor_token: identityToken,
-    actor_token_type: "urn:ietf:params:oauth:token-type:id_token",
-    resource: "https://api.github.com",
-    scope: "repo",
-  }),
-});
-
-const { access_token } = await response.json();
-
-// Use the scoped token — agent never saw the OAuth client secret
-const repos = await fetch("https://api.github.com/user/repos", {
-  headers: { Authorization: `Bearer ${access_token}` },
-});
-```
-
-### Why this matters
-
-Without OpenCloak, Daytona sandboxes receive raw credentials as environment variables:
-
-```python
-# Without OpenCloak — credentials exposed inside sandbox
-sandbox = daytona.create(env_vars={"GITHUB_TOKEN": "ghp_xxxxxxxxxxxx"})
-```
-
-With OpenCloak, the sandbox never sees long-lived credentials:
-
-```python
-# With OpenCloak — only the vault URL is exposed
-sandbox = daytona.create(env_vars={"OPENCLOAK_URL": "http://localhost:3422"})
-# Agent requests scoped, short-lived tokens at runtime
-```
-
-See [`examples/daytona/`](examples/daytona/) for the full runnable demo.
+The agent never has Discord credentials in its environment. It gets them at runtime through human-authorized token exchange.
 
 ## Deployment
 
-OpenCloak should only be accessible within your tailnet — never exposed to the public internet. Below are guides for common setups.
+### Heroku
 
-### Option A: VPS (Digital Ocean, Hetzner, etc.)
-
-Your VPS joins the tailnet and runs OpenCloak. OpenClaw and other agents on your tailnet connect to it via its tailnet hostname.
-
-**1. Install Tailscale on the VPS:**
+OpenCloak deploys to Heroku with env-var-based data seeding (Heroku has an ephemeral filesystem).
 
 ```bash
-curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up --hostname opencloak
+# Set environment variables
+heroku config:set \
+  OPENCLOAK_ISSUER=https://your-app.herokuapp.com \
+  GOOGLE_CLIENT_ID=... \
+  GOOGLE_CLIENT_SECRET=... \
+  DISCORD_WEBHOOK_URL=... \
+  DISCORD_WEBHOOK_ID=... \
+  DISCORD_WEBHOOK_TOKEN=...
+
+# Deploy
+git push heroku main
 ```
 
-**2. Clone and run OpenCloak:**
+Add these redirect URIs to your Google OAuth console:
+- `https://your-app.herokuapp.com/auth/google/callback`
+- `https://your-app.herokuapp.com/device/callback/google`
+
+### VPS (DigitalOcean, Hetzner, etc.)
 
 ```bash
 git clone https://github.com/runnerelectrode/opencloak.git
@@ -364,27 +267,21 @@ cd opencloak
 node cli.mjs start --data-dir /opt/opencloak/data --port 3422
 ```
 
-**3. Expose via Tailscale HTTPS (TLS handled automatically):**
-
-```bash
-tailscale serve https / http://localhost:3422
-```
-
-Your vault is now available at `https://opencloak.<your-tailnet>.ts.net` — only to devices on your tailnet.
-
-**4. Set your OAuth redirect URI to the tailnet hostname:**
+Set up a reverse proxy (Caddy, nginx) for HTTPS:
 
 ```
-https://opencloak.<your-tailnet>.ts.net/oauth/callback/discord
+opencloak.example.com {
+    reverse_proxy localhost:3422
+}
 ```
 
-**5. Run as a systemd service (so it survives reboots):**
+Run as a systemd service:
 
 ```bash
 sudo tee /etc/systemd/system/opencloak.service > /dev/null <<'EOF'
 [Unit]
 Description=OpenCloak OAuth Vault
-After=network.target tailscaled.service
+After=network.target
 
 [Service]
 Type=simple
@@ -393,8 +290,6 @@ WorkingDirectory=/opt/opencloak
 ExecStart=/usr/bin/node cli.mjs start --data-dir /opt/opencloak/data --port 3422
 Restart=always
 RestartSec=5
-Environment=OPENCLOAK_ENCRYPTION_KEY=<your-encryption-key>
-Environment=OPENCLOAK_TRUSTED_ISSUERS=https://idp.<your-tailnet>.ts.net
 
 [Install]
 WantedBy=multi-user.target
@@ -404,277 +299,121 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now opencloak
 ```
 
-**6. Using Docker on the VPS:**
+### Local Dev
 
 ```bash
-docker build -t opencloak .
-docker run -d \
-  --name opencloak \
-  --restart unless-stopped \
-  -p 127.0.0.1:3422:3422 \
-  -v opencloak-data:/data \
-  -e OPENCLOAK_ENCRYPTION_KEY=<your-encryption-key> \
-  -e OPENCLOAK_TRUSTED_ISSUERS=https://idp.<your-tailnet>.ts.net \
-  opencloak
-```
-
-Note: bind to `127.0.0.1` so it's only accessible via Tailscale, not the public IP.
-
-### Option B: Mac Mini (home server)
-
-Your Mac Mini joins the tailnet and runs OpenCloak directly. Good for home labs or small teams.
-
-**1. Install Tailscale:**
-
-Download from https://tailscale.com/download/mac or:
-
-```bash
-brew install tailscale
-```
-
-Make sure your Mac Mini is connected to your tailnet with MagicDNS enabled.
-
-**2. Clone and run OpenCloak:**
-
-```bash
-git clone https://github.com/runnerelectrode/opencloak.git
-cd opencloak
 node cli.mjs start --port 3422
 ```
 
 Data is stored in `~/.config/opencloak` by default.
 
-**3. Expose via Tailscale HTTPS:**
+## Identity Providers
+
+OpenCloak accepts OIDC tokens from any standard provider:
 
 ```bash
-tailscale serve https / http://localhost:3422
+# Google
+node cli.mjs add-issuer google --issuer-url https://accounts.google.com
+
+# Okta
+node cli.mjs add-issuer okta --issuer-url https://your-org.okta.com
+
+# Auth0
+node cli.mjs add-issuer auth0 --issuer-url https://your-tenant.auth0.com/
+
+# Any OIDC-compliant provider
+node cli.mjs add-issuer custom --issuer-url https://your-idp.example.com
 ```
 
-Your vault is now at `https://<mac-mini-hostname>.<your-tailnet>.ts.net`.
-
-**4. Set your OAuth redirect URI:**
-
-```
-https://<mac-mini-hostname>.<your-tailnet>.ts.net/oauth/callback/discord
-```
-
-**5. Run on startup with launchd:**
-
-```bash
-mkdir -p ~/Library/LaunchAgents
-
-cat > ~/Library/LaunchAgents/com.opencloak.vault.plist <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.opencloak.vault</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/usr/local/bin/node</string>
-        <string>$(pwd)/cli.mjs</string>
-        <string>start</string>
-        <string>--port</string>
-        <string>3422</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>OPENCLOAK_ENCRYPTION_KEY</key>
-        <string>your-encryption-key</string>
-        <key>OPENCLOAK_TRUSTED_ISSUERS</key>
-        <string>https://idp.your-tailnet.ts.net</string>
-    </dict>
-    <key>StandardOutPath</key>
-    <string>/tmp/opencloak.log</string>
-    <key>StandardErrorPath</key>
-    <string>/tmp/opencloak.err</string>
-</dict>
-</plist>
-EOF
-
-launchctl load ~/Library/LaunchAgents/com.opencloak.vault.plist
-```
-
-### Option C: Local dev
-
-Tailscale is **required** even for local development. tsidp can't work without it — its entire job is to ask the local Tailscale daemon "who is making this request?" via the WhoIs API. Without Tailscale running, there are no identities to verify.
-
-The dependency chain:
-
-```
-Tailscale (the network + identity layer)
-  └── tsidp (converts Tailscale identity -> signed OIDC tokens)
-        └── OpenCloak (accepts those tokens, enforces policy, returns scoped API access)
-```
-
-**1. Install Tailscale and join your tailnet:**
-
-```bash
-# macOS
-brew install tailscale
-
-# Linux
-curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up
-```
-
-**2. Run tsidp with `--use-local-tailscaled`:**
-
-```bash
-TAILSCALE_USE_WIP_CODE=1 go run . --use-local-tailscaled -local-port 4443
-```
-
-tsidp connects to your local Tailscale daemon and identifies requests by their Tailscale IP.
-
-**3. Start OpenCloak, trusting the local tsidp issuer:**
-
-```bash
-OPENCLOAK_TRUSTED_ISSUERS=http://localhost:4443 node cli.mjs start --port 3422
-```
-
-### Environment variables
-
-| Variable | Description |
-|----------|-------------|
-| `OPENCLOAK_DATA_DIR` | Data directory path (default: `~/.config/opencloak`) |
-| `OPENCLOAK_ENCRYPTION_KEY` | AES-256 key for encrypting secrets at rest |
-| `OPENCLOAK_TRUSTED_ISSUERS` | Comma-separated trusted OIDC issuers (merged with defaults) |
-
-## CLI Reference
-
-| Command | Description |
-|---------|-------------|
-| `start [--port 3422]` | Start the vault server |
-| `add-provider <name> --client-id X --client-secret Y` | Register an OAuth provider |
-| `register-agent --ts-identity <email-or-tag>` | Register an agent by Tailscale identity |
-| `policy set <identity> <provider> --scopes <scopes>` | Set agent permissions (comma-separated) |
-| `connect <provider> [--scopes "s1 s2"]` | Start OAuth consent flow (opens browser) |
-| `exchange --provider <name> --scope <scope>` | Manual token exchange (dev/testing) |
-| `list` | Show all registered entities |
-| `help` | Show usage information |
-
-## Architecture
-
-```
-┌──────────────┐     1      ┌──────────────┐     3      ┌──────────────┐
-│   OpenClaw   │ ──────────>│  OpenCloak   │ ──────────>│   Discord    │
-│  (AI agent)  │ <──────────│  (the vault) │ <──────────│     API      │
-└──────────────┘     2      └──────────────┘     4      └──────────────┘
-       │                          ▲
-       │                          │
-       └──────────────────────────┘
-       │
-       ▼
-┌──────────────┐
-│    tsidp     │
-│  (identity   │
-│    proof)    │
-└──────────────┘
-```
-
-OpenCloak is the gateway/vault — it sits in the middle. The "agent" is OpenClaw (or any AI bot/service that wants to talk to Discord or other OAuth providers). In production, OpenClaw runs on your Tailscale network and talks to OpenCloak to get scoped API access.
-
-### What happens step by step
-
-| Step | Who | Does what |
-|------|-----|-----------|
-| 1 | OpenClaw -> tsidp | "Prove I'm on this Tailscale network" |
-| 2 | OpenClaw -> OpenCloak | "Here's my identity proof, give me Discord access" (`POST /token`, RFC 8693) |
-| 3 | OpenCloak internally | Verifies identity, checks policy, fetches scoped token |
-| 4 | OpenClaw -> Discord | Uses the scoped token OpenCloak returned |
-
-OpenCloak is the gateway that:
-- Verifies the agent's Tailscale identity
-- Checks if the agent is **allowed** to access Discord (policy)
-- Returns only the **minimum access** needed (e.g., just a webhook, not full API)
-
-The agent never sees your Discord OAuth credentials. It only gets back what OpenCloak's policy allows.
-
-### In production, OpenClaw's code would look like:
-
-```javascript
-// 1. Get my Tailscale identity token
-const idToken = await getTsidpToken();
-
-// 2. Ask OpenCloak for Discord access
-const response = await fetch("http://opencloak:3422/token", {
-  method: "POST",
-  body: new URLSearchParams({
-    grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
-    actor_token: idToken,
-    actor_token_type: "urn:ietf:params:oauth:token-type:id_token",
-    resource: "https://discord.com/api",
-    scope: "webhook.incoming"
-  })
-});
-
-// 3. Post to Discord with the scoped token OpenCloak gave me
-const { webhook_url } = await response.json();
-await fetch(webhook_url, {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ content: "Hello from OpenClaw via OpenCloak!" })
-});
-```
+You can also set trusted issuers via `OPENCLOAK_TRUSTED_ISSUERS` env var (comma-separated URLs).
 
 ## API Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/token` | POST | RFC 8693 token exchange |
-| `/oauth/callback/:provider` | GET | OAuth callback (receives authorization codes) |
+| `/device/code` | POST | Start device authorization flow (RFC 8628) |
+| `/device/verify` | GET | Code entry page for human |
+| `/device/verify` | POST | Submit device code |
+| `/device/callback/:issuer` | GET | OIDC callback for device flow |
+| `/device/complete` | GET | Success page after authorization |
+| `/device/token` | GET | Agent polls for id_token |
+| `/auth/:issuer` | GET | Browser-based OIDC sign-in |
+| `/auth/:issuer/callback` | GET | OIDC callback for browser sign-in |
+| `/oauth/callback/:provider` | GET | OAuth callback (authorization codes) |
 | `/health` | GET | Health check |
 | `/.well-known/openid-configuration` | GET | OIDC discovery metadata |
-| `/jwks` | GET | JSON Web Key Set (public keys only) |
+| `/jwks` | GET | JSON Web Key Set |
+
+## CLI Reference
+
+| Command | Description |
+|---------|-------------|
+| `start [--port 3422]` | Start the vault server |
+| `add-issuer <name> --issuer-url <url> [--audience <aud>]` | Register an OIDC identity provider |
+| `add-provider <name> --client-id X --client-secret Y` | Register an OAuth provider |
+| `register-agent --identity <sub>` | Register an agent by OIDC identity |
+| `policy set <identity> <provider> --scopes <scopes>` | Set agent permissions |
+| `connect <provider> [--scopes "s1 s2"]` | Start OAuth consent flow |
+| `exchange --provider <name> --scope <scope>` | Manual token exchange (dev/testing) |
+| `list` | Show all registered entities |
+| `help` | Show usage information |
+
+## Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `OPENCLOAK_DATA_DIR` | Data directory path (default: `~/.config/opencloak`) |
+| `OPENCLOAK_ENCRYPTION_KEY` | AES-256 key for encrypting secrets at rest |
+| `OPENCLOAK_TRUSTED_ISSUERS` | Comma-separated trusted OIDC issuer URLs |
+| `OPENCLOAK_ISSUER` | Public URL of the vault (for OIDC discovery) |
 
 ## Project Structure
 
 ```
 opencloak/
-├── server.mjs              # HTTP server with all endpoints
-├── cli.mjs                 # CLI tool for vault management
-├── config.mjs              # Configuration and adapter singleton
-├── policy.mjs              # Per-agent policy evaluation
+├── server.mjs                          # HTTP server — all endpoints
+├── cli.mjs                             # CLI for vault management
+├── config.mjs                          # Configuration and adapter singleton
+├── policy.mjs                          # Per-agent policy evaluation
+├── heroku-start.mjs                    # Heroku startup with env-var seeding
+├── Procfile                            # Heroku process definition
 ├── grants/
-│   └── token-exchange.mjs  # RFC 8693 token exchange handler
+│   └── token-exchange.mjs              # RFC 8693 token exchange handler
 ├── verifiers/
-│   ├── oidc.mjs            # OIDC token verification (JWKS)
-│   └── index.mjs           # Verifier dispatcher
+│   ├── oidc.mjs                        # OIDC token verification (JWKS)
+│   └── index.mjs                       # Verifier dispatcher
 ├── providers/
-│   ├── base.mjs            # Provider interface
-│   ├── discord.mjs         # Discord OAuth2 connector
-│   └── generic-oauth.mjs   # Generic OAuth2 (for adding new providers)
+│   ├── base.mjs                        # Provider interface
+│   ├── discord.mjs                     # Discord OAuth2 connector
+│   └── generic-oauth.mjs              # Generic OAuth2 provider
 ├── adapters/
-│   ├── base.mjs            # Storage adapter interface
-│   └── json-file.mjs       # File-based storage with atomic writes
+│   ├── base.mjs                        # Storage adapter interface
+│   └── json-file.mjs                   # File-based storage (atomic writes)
+├── web/
+│   ├── index.html                      # Sign-in landing page
+│   ├── device.html                     # Device code entry page
+│   ├── device-complete.html            # "Authorization complete" page
+│   ├── style.css                       # Shared styles
+│   └── app.js                          # Client-side JS
+├── examples/
+│   └── daytona/
+│       └── device-flow-demo.mjs        # End-to-end Daytona demo
 ├── Dockerfile
 └── package.json
 ```
 
-## Adding New Providers
-
-Extend `providers/generic-oauth.mjs` or create a new provider file:
-
-```bash
-node cli.mjs add-provider github \
-  --client-id <ID> --client-secret <SECRET> \
-  --authorize-url https://github.com/login/oauth/authorize \
-  --token-url https://github.com/login/oauth/access_token \
-  --resource-uri https://api.github.com
-```
-
 ## Security Model
 
-- **Tailnet-only** — vault is never exposed to the public internet
+- **Network isolation** — deploy behind a firewall, VPN, or reverse proxy
 - **No stored API keys** — only OAuth refresh tokens (revocable, scoped)
 - **Per-agent policy** — each agent gets independently scoped access
-- **Atomic token rotation** — safe handling of rotating refresh tokens
-- **File permissions** — vault data stored with 0700/0600 permissions
+- **Device codes** — 256-bit random, 10-minute expiry, one-time retrieval
+- **User codes** — no vowels (avoids offensive words), no ambiguous chars (0/O, 1/I/L)
+- **Polling rate enforcement** — server-side `slow_down` per RFC 8628
+- **PKCE + nonce** — all OIDC flows use PKCE and nonce validation
+- **JWKS origin validation** — prevents SSRF via discovery document
+- **HTTPS enforced** — non-local OIDC endpoints must use HTTPS
 
 ## License
 

@@ -1,16 +1,10 @@
 import { createPublicKey, verify } from "node:crypto";
 
 // --- Trusted issuer patterns ---
-// Default: accept Tailscale tsidp HTTPS issuers.
-// Override with OPENCLOAK_TRUSTED_ISSUERS env var (comma-separated URLs or patterns).
-// Example: OPENCLOAK_TRUSTED_ISSUERS=http://localhost:4443,https://idp.mytailnet.ts.net
-const DEFAULT_ISSUER_PATTERNS = [
-  /^https:\/\/login\.tailscale\.com/,
-  /^https:\/\/[a-z0-9-]+\.ts\.net/,
-  /^https:\/\/[a-z0-9-]+\.tailscale\.ts\.net/,
-];
+// No defaults — configure via OPENCLOAK_TRUSTED_ISSUERS env var or `opencloak add-issuer`.
+// Example: OPENCLOAK_TRUSTED_ISSUERS=https://accounts.google.com,https://your-org.okta.com
 
-let trustedIssuers = DEFAULT_ISSUER_PATTERNS;
+let trustedIssuers = [];
 
 /**
  * Set trusted issuers. Accepts RegExp patterns or exact URL strings.
@@ -20,8 +14,14 @@ export function setTrustedIssuers(patterns) {
 }
 
 /**
+ * Append additional trusted issuers to the current list.
+ */
+export function addTrustedIssuers(urls) {
+  trustedIssuers = [...trustedIssuers, ...urls];
+}
+
+/**
  * Load trusted issuers from OPENCLOAK_TRUSTED_ISSUERS env var.
- * Merges with defaults rather than replacing them.
  */
 export function loadTrustedIssuersFromEnv() {
   const envVal = process.env.OPENCLOAK_TRUSTED_ISSUERS;
@@ -32,9 +32,8 @@ export function loadTrustedIssuersFromEnv() {
     .map((s) => s.trim())
     .filter(Boolean);
 
-  // Merge custom issuers with defaults
-  trustedIssuers = [...DEFAULT_ISSUER_PATTERNS, ...custom];
-  console.log(`Trusted issuers: ${custom.join(", ")} (+ defaults)`);
+  trustedIssuers = [...trustedIssuers, ...custom];
+  console.log(`Trusted issuers (env): ${custom.join(", ")}`);
 }
 
 // --- Algorithm allowlist ---
@@ -49,9 +48,9 @@ const jwksCache = new Map();
 const MAX_TOKEN_AGE_SECONDS = 600;
 
 /**
- * Verify a Tailscale tsidp OIDC token.
+ * Verify an OIDC token.
  *
- * @param {string} token - Raw JWT string from tsidp
+ * @param {string} token - Raw JWT string
  * @param {object} [options] - Verification options
  * @param {string} [options.audience] - Expected audience claim
  * @returns {{ sub: string, iss: string, aud: string|string[], email?: string }}
@@ -126,10 +125,13 @@ export async function verifyOidcToken(token, options = {}) {
     throw new OidcError("OIDC discovery missing jwks_uri");
   }
 
-  // Validate that jwks_uri is under the same origin as the issuer
+  // Validate that jwks_uri is under the same origin as the issuer,
+  // or is a well-known JWKS host for that issuer (e.g., Google uses
+  // googleapis.com for JWKS while issuer is accounts.google.com).
   const issuerOrigin = new URL(payload.iss).origin;
-  const jwksOrigin = new URL(discovery.jwks_uri).origin;
-  if (jwksOrigin !== issuerOrigin) {
+  const jwksUrl = new URL(discovery.jwks_uri);
+  const jwksOrigin = jwksUrl.origin;
+  if (jwksOrigin !== issuerOrigin && !isKnownJwksHost(payload.iss, jwksUrl.hostname)) {
     throw new OidcError("jwks_uri origin does not match issuer origin");
   }
 
@@ -193,7 +195,7 @@ function safeParse(b64url) {
  * @param {string} url
  * @param {boolean} allowHttp - If true, allow HTTP (for trusted local issuers only)
  */
-async function fetchJson(url, allowHttp = false) {
+export async function fetchJson(url, allowHttp = false) {
   const parsed = new URL(url);
 
   if (!allowHttp && parsed.protocol !== "https:") {
@@ -233,6 +235,17 @@ function isPrivateHost(hostname) {
     return true;
   }
   return false;
+}
+
+// Well-known JWKS hosts that legitimately differ from their issuer origin.
+// Google: issuer=accounts.google.com, jwks_uri=www.googleapis.com
+const KNOWN_JWKS_HOSTS = new Map([
+  ["https://accounts.google.com", ["www.googleapis.com", "googleapis.com"]],
+]);
+
+function isKnownJwksHost(issuer, jwksHostname) {
+  const allowed = KNOWN_JWKS_HOSTS.get(issuer.replace(/\/$/, ""));
+  return allowed ? allowed.some((h) => jwksHostname === h || jwksHostname.endsWith("." + h)) : false;
 }
 
 function isMetadataHost(hostname) {
