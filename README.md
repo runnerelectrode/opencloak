@@ -189,32 +189,26 @@ OpenCloak works with [Daytona](https://www.daytona.io/) sandboxes. The agent run
 > **Heroku required for Daytona.** Daytona Tier 1/Tier 2 sandboxes restrict outbound network access to a fixed allowlist. `*.herokuapp.com` and `*.linear.app` are on that allowlist, so the agent can reach both the vault and Linear directly from the sandbox.
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                       Daytona Sandbox                        │
-│                                                              │
-│   ┌────────────┐                                             │
-│   │  OpenClaw  │─── POST /device/code ────────┐              │
-│   │  (agent)   │─── GET  /device/token ───┐   │              │
-│   │            │─── POST /token ───────┐  │   │              │
-│   │            │                       │  │   │              │
-│   │            │<── Bearer token ──────┘  │   │              │
-│   │            │                          │   │              │
-│   │            │─── POST graphql ─────────│───│──────┐       │
-│   └────────────┘   (Bearer token)         │   │      │       │
-│                                           │   │      │       │
-└───────────────────────────────────────────│───│──────│───────┘
-                                            │   │      │
-                                            ▼   ▼      ▼
-                                     ┌────────────┐  ┌─────────┐
-                                     │  OpenCloak │  │ Linear  │
-                                     │  (vault)   │  │  API    │
-                                     └──────┬─────┘  └─────────┘
-                                            │
-                                            ▼
-                                     ┌────────────┐
-                                     │   Google   │
-                                     │   (OIDC)   │
-                                     └────────────┘
+┌─────────────────────────┐
+│     Daytona Sandbox     │
+│                         │
+│   ┌────────────┐        │       ┌────────────┐       ┌────────────┐
+│   │  OpenClaw  │───────────────>│  OpenCloak │──────>│   Google   │
+│   │  (agent)   │  POST /device/ │  (vault)   │ OIDC  │   (OIDC)   │
+│   │            │  code + token  │            │       └────────────┘
+│   │            │                │            │
+│   │            │  POST /token   │            │
+│   │            │  (id_token) ──>│            │
+│   │            │<── Bearer ─────│            │
+│   │            │    token       └────────────┘
+│   │            │
+│   │            │  POST graphql  ┌────────────┐
+│   │            │  Authorization:│   Linear   │
+│   │            │  Bearer ──────>│    API     │
+│   │            │<── issue ──────│            │
+│   └────────────┘   created      └────────────┘
+│                         │
+└─────────────────────────┘
 ```
 
 ### Daytona Demo
