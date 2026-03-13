@@ -56,7 +56,7 @@ The agent never sees your Linear OAuth credentials. It only gets back what OpenC
 
 - **Node.js 18+** installed
 - **An OIDC identity provider** (Google, Okta, Auth0, Azure AD, etc.)
-- A **third-party API** to delegate access to (Linear, GitHub, etc.)
+- A **third-party OAuth provider** to delegate access to (Linear, GitHub, etc.)
 
 ## Quick Start
 
