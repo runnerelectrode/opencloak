@@ -215,6 +215,21 @@ const data = await res.json();
 console.log("EXCHANGE:" + JSON.stringify(data));
 if (data.error) process.exit(1);
 
+// Look up the "Todo" (unstarted) state for the team
+const statesRes = await fetch("https://api.linear.app/graphql", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "Authorization": "Bearer " + data.access_token,
+  },
+  body: JSON.stringify({
+    query: \`{ team(id: "${LINEAR_TEAM_ID}") { states { nodes { id type } } } }\`,
+  }),
+});
+const statesData = await statesRes.json();
+const todoState = statesData.data?.team?.states?.nodes?.find(s => s.type === "unstarted");
+const stateInput = todoState ? \`, stateId: "\${todoState.id}"\` : "";
+
 // Create a Linear issue
 const sr = await fetch("https://api.linear.app/graphql", {
   method: "POST",
@@ -228,6 +243,7 @@ const sr = await fetch("https://api.linear.app/graphql", {
         title: "Device Flow Demo — OpenCloak + Daytona"
         description: "This issue was created by an AI agent in a headless Daytona sandbox.\\n\\nFlow: RFC 8628 Device Auth → Google sign-in → RFC 8693 Token Exchange → Linear API\\n\\nThe agent never had Linear credentials."
         teamId: "${LINEAR_TEAM_ID}"
+\${stateInput}
       }) {
         success
         issue { id identifier title url }
