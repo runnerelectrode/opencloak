@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Connect Provider — OpenCloak</title>
+  <link rel="stylesheet" href="/web/style.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>OpenCloak</h1>
+      <p>Connect your accounts so agents can request scoped access</p>
+    </header>
+
+    <div id="providers" class="card">
+      <h2>Providers</h2>
+      <div class="signin-buttons" id="provider-list">
+        <div class="loading">Loading providers...</div>
+      </div>
+    </div>
+
+    <div id="status" class="card" style="display:none;">
+      <h2 id="status-title"></h2>
+      <p id="status-message"></p>
+    </div>
+
+    <p class="explainer">
+      When you connect an account, OpenCloak stores the OAuth token securely.
+      Agents can then request scoped access via RFC 8693 token exchange &mdash;
+      they never see the underlying credentials.
+    </p>
+  </div>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+
+    // Show success/error from callback redirect
+    if (params.get("connected")) {
+      const statusEl = document.getElementById("status");
+      const titleEl = document.getElementById("status-title");
+      const msgEl = document.getElementById("status-message");
+      statusEl.style.display = "block";
+      titleEl.textContent = "Connected";
+      titleEl.className = "status-ok";
+      msgEl.textContent = `${params.get("provider") || "Provider"} account connected successfully. Agents can now request scoped tokens.`;
+    } else if (params.get("error")) {
+      const statusEl = document.getElementById("status");
+      const titleEl = document.getElementById("status-title");
+      const msgEl = document.getElementById("status-message");
+      statusEl.style.display = "block";
+      titleEl.textContent = "Connection Failed";
+      titleEl.className = "status-err";
+      msgEl.textContent = params.get("error_description") || params.get("error");
+    }
+
+    // Load providers
+    async function loadProviders() {
+      const listEl = document.getElementById("provider-list");
+      try {
+        const res = await fetch("/providers");
+        if (!res.ok) throw new Error("Failed to load providers");
+        const providers = await res.json();
+
+        if (!providers.length) {
+          listEl.innerHTML = '<div class="no-issuers">No providers configured.</div>';
+          return;
+        }
+
+        listEl.innerHTML = providers.map(p => {
+          const name = p.name || p.id;
+          const display = name.charAt(0).toUpperCase() + name.slice(1);
+          const scopes = p.id === "linear" ? "issues:create,read" : "read";
+          return `<a href="/connect/${p.id}?scopes=${encodeURIComponent(scopes)}" class="signin-btn">
+            Connect ${display}
+          </a>`;
+        }).join("");
+      } catch (e) {
+        listEl.innerHTML = '<div class="no-issuers">Could not load providers.</div>';
+      }
+    }
+
+    loadProviders();
+  </script>
+</body>
+</html>

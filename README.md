@@ -109,6 +109,10 @@ node cli.mjs policy set user@example.com linear --scopes "issues:create"
 
 ### 6. Connect your account (one-time, human-in-the-loop)
 
+**Web UI:** Navigate to `/connect` on your vault to connect accounts via OAuth in the browser.
+
+**CLI:**
+
 ```bash
 node cli.mjs connect linear --scopes "issues:create"
 ```
@@ -211,27 +215,26 @@ OpenCloak works with [Daytona](https://www.daytona.io/) sandboxes. The agent run
 └─────────────────────────┘
 ```
 
-### Daytona Demo
+### Daytona Demos
 
-The `examples/daytona/device-flow-demo.mjs` script runs the full flow end-to-end:
-
-1. Creates a Daytona sandbox
-2. Agent in sandbox calls `POST /device/code` → gets a short code
-3. You sign in with Google in your browser
-4. Agent polls `GET /device/token` → gets `id_token`
-5. Agent calls `POST /token` (RFC 8693) → gets Linear Bearer token
-6. Agent creates a Linear issue directly from the sandbox
+**OpenClaw Agent Demo** — a real [OpenClaw](https://github.com/runnerelectrode/openclaw) agent runs inside the sandbox and autonomously reasons through the token exchange and Linear issue creation:
 
 ```bash
 export DAYTONA_API_KEY=your_key
-export DAYTONA_API_URL=https://app.daytona.io/api
+export ANTHROPIC_API_KEY=your_key   # or OPENROUTER_API_KEY
 export HEROKU_API_KEY=your_heroku_key
 export LINEAR_TEAM_ID=your_team_id
 
-node examples/daytona/device-flow-demo.mjs
+node examples/daytona/openclaw-demo.mjs
 ```
 
-The agent never has Linear credentials in its environment. It gets a scoped Bearer token at runtime through human-authorized token exchange, and calls the Linear API directly.
+The script creates a Daytona sandbox, configures OpenClaw, runs the device flow, then prompts the OpenClaw agent with instructions to perform the RFC 8693 token exchange and create a Linear issue. The agent reasons through both steps autonomously — it never has Linear credentials in its environment.
+
+**Raw Script Demo** — same flow but using raw `fetch()` scripts instead of an agent:
+
+```bash
+node examples/daytona/device-flow-demo.mjs
+```
 
 ## Deployment
 
@@ -336,9 +339,12 @@ You can also set trusted issuers via `OPENCLOAK_TRUSTED_ISSUERS` env var (comma-
 | `/device/callback/:issuer` | GET | OIDC callback for device flow |
 | `/device/complete` | GET | Success page after authorization |
 | `/device/token` | GET | Agent polls for id_token |
+| `/connect` | GET | Web UI to connect provider accounts |
+| `/connect/:provider` | GET | Start OAuth connect flow (302 redirect) |
+| `/providers` | GET | List configured providers |
 | `/auth/:issuer` | GET | Browser-based OIDC sign-in |
 | `/auth/:issuer/callback` | GET | OIDC callback for browser sign-in |
-| `/oauth/callback/:provider` | GET | OAuth callback (authorization codes) |
+| `/oauth/callback/:provider` | GET | OAuth callback (stores connected account) |
 | `/health` | GET | Health check |
 | `/.well-known/openid-configuration` | GET | OIDC discovery metadata |
 | `/jwks` | GET | JSON Web Key Set |
@@ -365,6 +371,8 @@ You can also set trusted issuers via `OPENCLOAK_TRUSTED_ISSUERS` env var (comma-
 | `OPENCLOAK_ENCRYPTION_KEY` | AES-256 key for encrypting secrets at rest |
 | `OPENCLOAK_TRUSTED_ISSUERS` | Comma-separated trusted OIDC issuer URLs |
 | `OPENCLOAK_ISSUER` | Public URL of the vault (for OIDC discovery) |
+| `REGISTERED_AGENTS` | JSON array of agents to seed on startup (Heroku) |
+| `CONNECTED_ACCOUNTS` | JSON array of connected accounts to seed on startup (Heroku) |
 
 ## Project Structure
 
@@ -392,11 +400,13 @@ opencloak/
 │   ├── index.html                      # Sign-in landing page
 │   ├── device.html                     # Device code entry page
 │   ├── device-complete.html            # "Authorization complete" page
+│   ├── connect.html                    # Connect provider accounts page
 │   ├── style.css                       # Shared styles
 │   └── app.js                          # Client-side JS
 ├── examples/
 │   └── daytona/
-│       └── device-flow-demo.mjs        # End-to-end Daytona demo
+│       ├── openclaw-demo.mjs           # OpenClaw agent demo (recommended)
+│       └── device-flow-demo.mjs        # Raw script demo
 ├── Dockerfile
 └── package.json
 ```

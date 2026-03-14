@@ -66,6 +66,29 @@ async function seed() {
   });
   console.log("  Seeded owner: demo-owner");
 
+  // Connected accounts (JSON: [{"owner":"...","provider":"...","access_token":"...","refresh_token":"...","scopes":"..."},...])
+  const accountsJson = process.env.CONNECTED_ACCOUNTS;
+  if (accountsJson) {
+    try {
+      const accounts = JSON.parse(accountsJson);
+      for (const a of accounts) {
+        const accountId = crypto.randomUUID();
+        await writeJson("accounts", accountId, {
+          owner_id: a.owner || "demo-owner",
+          provider_id: a.provider || "linear",
+          access_token: a.access_token,
+          refresh_token: a.refresh_token || "",
+          scopes_granted: a.scopes || "issues:create,read",
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        });
+        console.log(`  Seeded connected account: ${a.owner || "demo-owner"} → ${a.provider || "linear"}`);
+      }
+    } catch (e) {
+      console.error("  Failed to parse CONNECTED_ACCOUNTS:", e.message);
+    }
+  }
+
   // Registered agents (JSON: [{"identity":"...","owner":"..."},...])
   const agentsJson = process.env.REGISTERED_AGENTS;
   if (agentsJson) {

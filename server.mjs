@@ -142,7 +142,7 @@ const API_SECURITY_HEADERS = {
 const WEB_SECURITY_HEADERS = {
   "X-Content-Type-Options": "nosniff",
   "X-Frame-Options": "DENY",
-  "Content-Security-Policy": "default-src 'self'; img-src 'self' data: https:; connect-src 'self'",
+  "Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'",
   "Referrer-Policy": "no-referrer",
 };
 
@@ -386,10 +386,10 @@ export async function startServer(options = {}) {
         const callbackError = url.searchParams.get("error");
 
         if (callbackError) {
-          return json(res, 400, {
-            error: "provider_denied",
-            error_description: "authorization was denied by the provider",
-          });
+          const errorUrl = `/connect?error=provider_denied&error_description=${encodeURIComponent("authorization was denied by the provider")}`;
+          res.writeHead(302, { Location: errorUrl });
+          res.end();
+          return;
         }
 
         if (!code || !state) {
@@ -475,18 +475,16 @@ export async function startServer(options = {}) {
           await adapter.upsert("accounts", accountId, accountData);
           await adapter.destroy("sessions", state);
 
-          return json(res, 200, {
-            message: "Account connected successfully",
-            account_id: accountId,
-            provider: session.provider_id,
-            scopes: tokenData.scope || session.scopes,
-          });
+          const successUrl = `/connect?connected=1&provider=${encodeURIComponent(session.provider_id)}&scopes=${encodeURIComponent(tokenData.scope || session.scopes)}`;
+          res.writeHead(302, { Location: successUrl });
+          res.end();
+          return;
         } catch (err) {
           console.error("OAuth callback error:", err);
-          return json(res, 500, {
-            error: "server_error",
-            error_description: "failed to complete OAuth flow",
-          });
+          const errorUrl = `/connect?error=server_error&error_description=${encodeURIComponent("failed to complete OAuth flow")}`;
+          res.writeHead(302, { Location: errorUrl });
+          res.end();
+          return;
         }
       }
 
@@ -545,6 +543,18 @@ export async function startServer(options = {}) {
         res.writeHead(302, { Location: authorizeUrl });
         res.end();
         return;
+      }
+
+      // --- GET /providers ---
+      if (pathname === "/providers" && req.method === "GET") {
+        const allProviders = await adapter.findAll("providers");
+        const list = allProviders.map((p) => ({ id: p.id, name: p.name || p.id }));
+        return json(res, 200, list);
+      }
+
+      // --- GET /connect (page) ---
+      if (pathname === "/connect" && req.method === "GET") {
+        return serveStaticFile(res, path.join(WEB_DIR, "connect.html"));
       }
 
       // --- GET /health ---
