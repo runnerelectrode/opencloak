@@ -63,7 +63,7 @@ async function generateJwks(adapter) {
 const MAX_BODY_BYTES = 64 * 1024; // 64 KB
 const BODY_TIMEOUT_MS = 10000;
 const SESSION_MAX_AGE_MS = 10 * 60 * 1000; // 10 minutes
-const WEB_SESSION_MAX_AGE_MS = 30 * 60 * 1000; // 30 minutes
+const WEB_SESSION_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
 const SESSION_CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
 // --- Rate limiter (sliding window per IP) ---
@@ -206,7 +206,7 @@ function buildSessionCookie(sessionId, issuerUrl) {
     !issuerUrl ||
     issuerUrl.startsWith("http://localhost") ||
     issuerUrl.startsWith("http://127.0.0.1");
-  let cookie = `opencloak_session=${sessionId}; HttpOnly; SameSite=Lax; Path=/; Max-Age=1800`;
+  let cookie = `opencloak_session=${sessionId}; HttpOnly; SameSite=Lax; Path=/; Max-Age=86400`;
   if (!isLocal) {
     cookie += "; Secure";
   }
@@ -226,6 +226,32 @@ function generatePKCE() {
     .update(verifier)
     .digest("base64url");
   return { verifier, challenge };
+}
+
+// --- Vault-issued id_token minting ---
+
+function mintIdToken(vaultIssuer, jwksData, claims) {
+  const privateJwk = jwksData.keys[0];
+  const header = { alg: "ES256", typ: "JWT", kid: privateJwk.kid };
+  const now = Math.floor(Date.now() / 1000);
+  const payload = {
+    iss: vaultIssuer,
+    sub: claims.sub,
+    aud: vaultIssuer,
+    email: claims.email,
+    iat: now,
+    exp: now + 600,
+  };
+
+  const headerB64 = Buffer.from(JSON.stringify(header)).toString("base64url");
+  const payloadB64 = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const signingInput = `${headerB64}.${payloadB64}`;
+
+  const key = crypto.createPrivateKey({ key: privateJwk, format: "jwk" });
+  const signature = crypto.sign("SHA256", Buffer.from(signingInput), key);
+  const sigB64 = signature.toString("base64url");
+
+  return `${headerB64}.${payloadB64}.${sigB64}`;
 }
 
 // --- Device Authorization Flow helpers ---
@@ -313,6 +339,9 @@ export async function startServer(options = {}) {
     addTrustedIssuers(storedIssuers.map((i) => i.issuer_url));
     console.log(`Loaded ${storedIssuers.length} issuer(s) from storage`);
   }
+
+  // Trust the vault's own issuer so vault-minted id_tokens are accepted
+  addTrustedIssuers([issuer]);
 
   const jwksData = await generateJwks(adapter);
 
@@ -409,10 +438,9 @@ export async function startServer(options = {}) {
 
         const session = await adapter.find("sessions", state);
         if (!session) {
-          return json(res, 400, {
-            error: "invalid_request",
-            error_description: "invalid or expired state parameter",
-          });
+          res.writeHead(302, { Location: "/connect?error=expired_state&error_description=Session+expired.+Please+try+connecting+again." });
+          res.end();
+          return;
         }
 
         // Check session expiry (Finding 8)
@@ -475,7 +503,8 @@ export async function startServer(options = {}) {
           await adapter.upsert("accounts", accountId, accountData);
           await adapter.destroy("sessions", state);
 
-          const successUrl = `/connect?connected=1&provider=${encodeURIComponent(session.provider_id)}&scopes=${encodeURIComponent(tokenData.scope || session.scopes)}`;
+          const basePath = session.return_to === "device" ? "/device/complete" : "/connect";
+          const successUrl = `${basePath}?connected=1&provider=${encodeURIComponent(session.provider_id)}&scopes=${encodeURIComponent(tokenData.scope || session.scopes)}`;
           res.writeHead(302, { Location: successUrl });
           res.end();
           return;
@@ -526,10 +555,13 @@ export async function startServer(options = {}) {
         const state = crypto.randomBytes(16).toString("hex");
         const redirectUri = `${issuer}/oauth/callback/${providerName}`;
 
+        const returnTo = url.searchParams.get("return_to") || "";
+
         await adapter.upsert("sessions", state, {
           provider_id: providerConfig.id,
           owner_id: owner.id,
           scopes,
+          return_to: returnTo,
           created_at: new Date().toISOString(),
         });
 
@@ -936,6 +968,31 @@ export async function startServer(options = {}) {
           return htmlPage(res, 400, "Error", `<div class="card"><h2>Code Expired</h2><p>This code has expired. Please request a new one from your agent.</p></div>`);
         }
 
+        // Check for existing web session — auto-approve if human already signed in
+        const cookies = parseCookies(req);
+        const webSessionId = cookies.opencloak_session;
+        if (webSessionId) {
+          const webSession = await adapter.find("sessions", webSessionId);
+          if (webSession && webSession.type === "web") {
+            const webAge = Date.now() - new Date(webSession.created_at).getTime();
+            if (webAge <= WEB_SESSION_MAX_AGE_MS && webSession.claims && webSession.claims.sub) {
+              // Human already authenticated — mint a vault id_token and auto-approve
+              const vaultIdToken = mintIdToken(issuer, jwksData, webSession.claims);
+              const vaultClaims = JSON.parse(
+                Buffer.from(vaultIdToken.split(".")[1], "base64url").toString("utf-8")
+              );
+              await adapter.upsert("sessions", deviceSession.id, {
+                ...deviceSession,
+                status: "authorized",
+                id_token: vaultIdToken,
+                claims: vaultClaims,
+              });
+              console.log(`Device code auto-approved for ${webSession.claims.email || webSession.claims.sub}`);
+              return redirect(res, "/device/complete");
+            }
+          }
+        }
+
         // Determine issuer — if pre-selected or only one available
         let targetIssuerId = deviceSession.issuer_id || body.issuer_id;
         if (!targetIssuerId) {
@@ -1095,7 +1152,17 @@ export async function startServer(options = {}) {
           // Delete auth session
           await adapter.destroy("sessions", state);
 
-          return redirect(res, "/device/complete");
+          // Create web session so subsequent device flows auto-approve
+          const deviceWebSessionId = crypto.randomBytes(32).toString("hex");
+          await adapter.upsert("sessions", deviceWebSessionId, {
+            type: "web",
+            issuer_id: issuerId,
+            id_token: idToken,
+            claims,
+            created_at: new Date().toISOString(),
+          });
+
+          return redirect(res, "/device/complete", buildSessionCookie(deviceWebSessionId, issuer));
         } catch (err) {
           console.error("Device callback error:", err);
           return htmlPage(res, 500, "Error", `<div class="card"><h2>Error</h2><p>An unexpected error occurred.</p></div>`);

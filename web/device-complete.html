@@ -13,9 +13,59 @@
     </header>
 
     <div class="card" style="text-align: center;">
-      <h2 class="status-ok">Authorization Complete</h2>
-      <p style="margin-top: 0.75rem;">You can close this tab and return to your agent.</p>
+      <h2 class="status-ok">Identity Verified</h2>
+      <p style="margin-top: 0.75rem;">Your identity has been confirmed. Now connect the accounts your agent needs access to.</p>
+    </div>
+
+    <div id="providers" class="card">
+      <h2>Connect Provider Accounts</h2>
+      <p>Connect the accounts below so your agent can request scoped tokens.</p>
+      <div class="signin-buttons" id="provider-list">
+        <div class="loading">Loading providers...</div>
+      </div>
+    </div>
+
+    <div id="all-connected" class="card" style="display:none; text-align: center;">
+      <h2 class="status-ok">All Done</h2>
+      <p>You can close this tab and return to your agent.</p>
     </div>
   </div>
+
+  <script>
+    async function loadProviders() {
+      const listEl = document.getElementById("provider-list");
+      try {
+        const res = await fetch("/providers");
+        if (!res.ok) throw new Error("Failed to load providers");
+        const providers = await res.json();
+
+        if (!providers.length) {
+          document.getElementById("providers").style.display = "none";
+          document.getElementById("all-connected").style.display = "block";
+          return;
+        }
+
+        listEl.innerHTML = providers.map(p => {
+          const name = p.name || p.id;
+          const display = name.charAt(0).toUpperCase() + name.slice(1);
+          const scopes = p.id === "linear" ? "issues:create,read" : "read";
+          return `<a href="/connect/${p.id}?scopes=${encodeURIComponent(scopes)}&return_to=device" class="signin-btn">
+            Connect ${display}
+          </a>`;
+        }).join("");
+      } catch (e) {
+        listEl.innerHTML = '<div class="no-issuers">Could not load providers.</div>';
+      }
+    }
+
+    // Check if we just came back from connecting
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("connected")) {
+      document.getElementById("providers").style.display = "none";
+      document.getElementById("all-connected").style.display = "block";
+    } else {
+      loadProviders();
+    }
+  </script>
 </body>
 </html>

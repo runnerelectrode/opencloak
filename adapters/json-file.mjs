@@ -215,7 +215,7 @@ export class JsonFileAdapter extends VaultAdapter {
   // --- Session cleanup (removes expired sessions) ---
 
   async cleanExpiredSessions(maxAgeMs = 10 * 60 * 1000) {
-    const WEB_SESSION_MAX_AGE_MS = 30 * 60 * 1000;
+    const WEB_SESSION_MAX_AGE_MS = 24 * 60 * 60 * 1000;
     const sessions = await this.findAll("sessions");
     const now = Date.now();
     for (const s of sessions) {

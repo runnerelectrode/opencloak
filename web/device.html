@@ -38,6 +38,16 @@
   </div>
 
   <script>
+    // Check if already signed in — show identity hint
+    fetch("/auth/session").then(r => r.json()).then(data => {
+      if (data.authenticated && data.claims && data.claims.email) {
+        const hint = document.createElement("p");
+        hint.style.cssText = "text-align:center;color:#4caf50;font-size:0.9rem;margin-top:0.5rem;";
+        hint.textContent = "Signed in as " + data.claims.email + " — no sign-in required.";
+        document.querySelector(".card").appendChild(hint);
+      }
+    }).catch(() => {});
+
     // Pre-fill from ?code= query parameter
     const params = new URLSearchParams(window.location.search);
     const codeParam = params.get("code");

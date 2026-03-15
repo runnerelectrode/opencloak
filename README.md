@@ -236,6 +236,39 @@ The script creates a Daytona sandbox, configures OpenClaw, runs the device flow,
 node examples/daytona/device-flow-demo.mjs
 ```
 
+## OpenClaw Skill
+
+OpenCloak ships with an [OpenClaw](https://github.com/runnerelectrode/openclaw) skill that teaches any agent how to authenticate via the device flow — no demo script needed.
+
+### Install the skill
+
+```bash
+# Copy to your OpenClaw skills directory
+cp -r skills/opencloak-auth ~/.openclaw/skills/
+
+# Or symlink it
+ln -s $(pwd)/skills/opencloak-auth ~/.openclaw/skills/opencloak-auth
+```
+
+### Use it
+
+Set the vault URL and ask the agent to do something that requires API access:
+
+```bash
+export OPENCLOAK_URL=https://your-vault.herokuapp.com
+
+openclaw agent -m "Create a Linear issue titled 'Hello from OpenClaw' in team YOUR_TEAM_ID"
+```
+
+The agent will automatically:
+1. Call `POST /device/code` to get a short code
+2. Show you the verification link to sign in
+3. Poll until you authorize
+4. Exchange the id_token for a scoped Bearer token
+5. Call the API with the Bearer token
+
+No credentials ever enter the agent's environment.
+
 ## Deployment
 
 ### Heroku
@@ -403,6 +436,9 @@ opencloak/
 │   ├── connect.html                    # Connect provider accounts page
 │   ├── style.css                       # Shared styles
 │   └── app.js                          # Client-side JS
+├── skills/
+│   └── opencloak-auth/
+│       └── SKILL.md                    # OpenClaw skill for device flow auth
 ├── examples/
 │   └── daytona/
 │       ├── openclaw-demo.mjs           # OpenClaw agent demo (recommended)
