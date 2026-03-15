@@ -248,7 +248,7 @@ function mintIdToken(vaultIssuer, jwksData, claims) {
   const signingInput = `${headerB64}.${payloadB64}`;
 
   const key = crypto.createPrivateKey({ key: privateJwk, format: "jwk" });
-  const signature = crypto.sign("SHA256", Buffer.from(signingInput), key);
+  const signature = crypto.sign("SHA256", Buffer.from(signingInput), { key, dsaEncoding: "ieee-p1363" });
   const sigB64 = signature.toString("base64url");
 
   return `${headerB64}.${payloadB64}.${sigB64}`;
@@ -589,6 +589,12 @@ export async function startServer(options = {}) {
         return serveStaticFile(res, path.join(WEB_DIR, "connect.html"));
       }
 
+      // --- GET /admin/accounts --- (export connected accounts for env var persistence)
+      if (pathname === "/admin/accounts" && req.method === "GET") {
+        const allAccounts = await adapter.findAll("accounts");
+        return json(res, 200, allAccounts);
+      }
+
       // --- GET /health ---
       if (pathname === "/health" && req.method === "GET") {
         return json(res, 200, { status: "ok", version: "0.1.0" });
@@ -912,16 +918,42 @@ export async function startServer(options = {}) {
           }
         }
 
-        await adapter.upsert("sessions", deviceCode, {
-          type: "device",
-          user_code: userCode,
-          status: "pending",
-          issuer_id: issuerId,
-          id_token: null,
-          claims: null,
-          last_poll: null,
-          created_at: new Date().toISOString(),
-        });
+        // Auto-approve: if there's a registered agent with connected accounts,
+        // mint a vault id_token and mark as authorized immediately — no browser needed.
+        const agents = await adapter.findAll("agents");
+        const accounts = await adapter.findAll("accounts");
+        if (agents.length > 0 && accounts.length > 0) {
+          const agent = agents[0];
+          const vaultIdToken = mintIdToken(issuer, jwksData, {
+            sub: agent.identity,
+            email: agent.identity,
+          });
+          const vaultClaims = JSON.parse(
+            Buffer.from(vaultIdToken.split(".")[1], "base64url").toString("utf-8")
+          );
+          await adapter.upsert("sessions", deviceCode, {
+            type: "device",
+            user_code: userCode,
+            status: "authorized",
+            issuer_id: issuerId,
+            id_token: vaultIdToken,
+            claims: vaultClaims,
+            last_poll: null,
+            created_at: new Date().toISOString(),
+          });
+          console.log(`Device code auto-approved for registered agent ${agent.identity}`);
+        } else {
+          await adapter.upsert("sessions", deviceCode, {
+            type: "device",
+            user_code: userCode,
+            status: "pending",
+            issuer_id: issuerId,
+            id_token: null,
+            claims: null,
+            last_poll: null,
+            created_at: new Date().toISOString(),
+          });
+        }
 
         const verificationUri = `${issuer}/device/verify`;
         return json(res, 200, {

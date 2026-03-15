@@ -13,6 +13,8 @@ Any AI agent proves who it is with a standard OIDC token (Google, Okta, Auth0, A
 
 ## How It Works
 
+### First Time (human-in-the-loop)
+
 ```
                         ┌─────────┐
                         │  Human  │
@@ -50,7 +52,28 @@ Any AI agent proves who it is with a standard OIDC token (Google, Okta, Auth0, A
 | ⑤ | OpenCloak checks policy, returns a scoped Bearer token for Linear |
 | ⑥ | Agent calls Linear GraphQL API directly with the Bearer token |
 
-The agent never sees your Linear OAuth credentials. It only gets back what OpenCloak's policy allows — a scoped, short-lived Bearer token. The human authorizes the agent by entering a short code — the agent never opens a browser.
+### After Setup (fully autonomous)
+
+Once the human has signed in and connected their accounts, subsequent requests are **fully autonomous** — no browser, no human interaction:
+
+```
+┌──────────────┐  ①  ┌──────────────┐
+│   AI Agent   │────>│  OpenCloak   │  Vault sees registered agent +
+│  (headless   │     │  (the vault) │  connected accounts → auto-approves
+│   sandbox)   │<────│              │
+└──────────────┘  ②  └──────────────┘
+       │
+       │  ③ Bearer token
+       ▼
+┌──────────────┐
+│   Linear     │
+│   GraphQL    │
+└──────────────┘
+```
+
+The vault auto-approves device codes when a registered agent with connected accounts already exists. The agent gets a vault-minted `id_token` immediately — no polling, no waiting. The human only authorizes once.
+
+The agent never sees your Linear OAuth credentials. It only gets back what OpenCloak's policy allows — a scoped, short-lived Bearer token.
 
 ## Prerequisites
 
@@ -131,7 +154,7 @@ curl -X POST http://localhost:3422/token \
 
 ## Device Flow for Headless Agents
 
-When an agent can't open a browser (sandboxed, headless, CI/CD), use the device flow:
+When an agent can't open a browser (sandboxed, headless, CI/CD), use the device flow. On the first run, a human signs in via the browser. **After setup, the vault auto-approves** and the agent gets tokens instantly with zero human interaction.
 
 ```javascript
 // 1. Agent requests a device code
@@ -378,6 +401,7 @@ You can also set trusted issuers via `OPENCLOAK_TRUSTED_ISSUERS` env var (comma-
 | `/auth/:issuer` | GET | Browser-based OIDC sign-in |
 | `/auth/:issuer/callback` | GET | OIDC callback for browser sign-in |
 | `/oauth/callback/:provider` | GET | OAuth callback (stores connected account) |
+| `/admin/accounts` | GET | Export connected accounts (for env var persistence) |
 | `/health` | GET | Health check |
 | `/.well-known/openid-configuration` | GET | OIDC discovery metadata |
 | `/jwks` | GET | JSON Web Key Set |
@@ -457,6 +481,7 @@ opencloak/
 - **Polling rate enforcement** — server-side `slow_down` per RFC 8628
 - **PKCE + nonce** — all OIDC flows use PKCE and nonce validation
 - **JWKS origin validation** — prevents SSRF via discovery document
+- **Vault-minted id_tokens** — auto-approved device flows use vault-signed ES256 JWTs (not long-lived credentials)
 - **HTTPS enforced** — non-local OIDC endpoints must use HTTPS
 
 ## License

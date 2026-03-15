@@ -160,7 +160,22 @@ export async function verifyOidcToken(token, options = {}) {
     ? "SHA256"
     : undefined;
 
-  const valid = verify(algorithm, signingInput, pubKey, signature);
+  // JWT spec requires IEEE P1363 encoding for ECDSA (ES256).
+  // Try P1363 first, fall back to DER for compatibility.
+  let valid;
+  if (header.alg === "ES256") {
+    try {
+      valid = verify(algorithm, signingInput, { key: pubKey, dsaEncoding: "ieee-p1363" }, signature);
+    } catch {
+      valid = false;
+    }
+    if (!valid) {
+      // Fallback: try DER encoding
+      valid = verify(algorithm, signingInput, pubKey, signature);
+    }
+  } else {
+    valid = verify(algorithm, signingInput, pubKey, signature);
+  }
   if (!valid) {
     throw new OidcError("invalid signature");
   }
