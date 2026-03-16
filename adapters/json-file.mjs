@@ -220,7 +220,7 @@ export class JsonFileAdapter extends VaultAdapter {
     const now = Date.now();
     for (const s of sessions) {
       const created = new Date(s.created_at || 0).getTime();
-      const ttl = s.type === "web" ? WEB_SESSION_MAX_AGE_MS : maxAgeMs;
+      const ttl = (s.type === "web" || (s.type === "device" && s.status === "authorized")) ? WEB_SESSION_MAX_AGE_MS : maxAgeMs;
       if (now - created > ttl) {
         await this.destroy("sessions", s.id);
       }

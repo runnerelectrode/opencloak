@@ -918,42 +918,19 @@ export async function startServer(options = {}) {
           }
         }
 
-        // Auto-approve: if there's a registered agent with connected accounts,
-        // mint a vault id_token and mark as authorized immediately — no browser needed.
-        const agents = await adapter.findAll("agents");
-        const accounts = await adapter.findAll("accounts");
-        if (agents.length > 0 && accounts.length > 0) {
-          const agent = agents[0];
-          const vaultIdToken = mintIdToken(issuer, jwksData, {
-            sub: agent.identity,
-            email: agent.identity,
-          });
-          const vaultClaims = JSON.parse(
-            Buffer.from(vaultIdToken.split(".")[1], "base64url").toString("utf-8")
-          );
-          await adapter.upsert("sessions", deviceCode, {
-            type: "device",
-            user_code: userCode,
-            status: "authorized",
-            issuer_id: issuerId,
-            id_token: vaultIdToken,
-            claims: vaultClaims,
-            last_poll: null,
-            created_at: new Date().toISOString(),
-          });
-          console.log(`Device code auto-approved for registered agent ${agent.identity}`);
-        } else {
-          await adapter.upsert("sessions", deviceCode, {
-            type: "device",
-            user_code: userCode,
-            status: "pending",
-            issuer_id: issuerId,
-            id_token: null,
-            claims: null,
-            last_poll: null,
-            created_at: new Date().toISOString(),
-          });
-        }
+        // Every new device code starts as pending — human must approve via browser (RFC 8628).
+        // A new sandbox is a new instance that could be malicious. Each needs human-in-the-loop.
+        // (The /device/verify page will auto-approve if the human has an active browser session.)
+        await adapter.upsert("sessions", deviceCode, {
+          type: "device",
+          user_code: userCode,
+          status: "pending",
+          issuer_id: issuerId,
+          id_token: null,
+          claims: null,
+          last_poll: null,
+          created_at: new Date().toISOString(),
+        });
 
         const verificationUri = `${issuer}/device/verify`;
         return json(res, 200, {
@@ -1184,7 +1161,8 @@ export async function startServer(options = {}) {
           // Delete auth session
           await adapter.destroy("sessions", state);
 
-          // Create web session so subsequent device flows auto-approve
+          // Create web session so the human can approve additional device codes
+          // without re-authenticating with Google (same browser session)
           const deviceWebSessionId = crypto.randomBytes(32).toString("hex");
           await adapter.upsert("sessions", deviceWebSessionId, {
             type: "web",
@@ -1218,9 +1196,10 @@ export async function startServer(options = {}) {
           return json(res, 400, { error: "expired_token", error_description: "device code not found or expired" });
         }
 
-        // Check expiry
+        // Check expiry — pending codes expire in 10 min, authorized sessions last 24h
         const deviceAge = Date.now() - new Date(deviceSession.created_at).getTime();
-        if (deviceAge > SESSION_MAX_AGE_MS) {
+        const maxAge = deviceSession.status === "authorized" ? WEB_SESSION_MAX_AGE_MS : SESSION_MAX_AGE_MS;
+        if (deviceAge > maxAge) {
           await adapter.destroy("sessions", deviceCode);
           return json(res, 400, { error: "expired_token", error_description: "device code expired" });
         }
@@ -1241,11 +1220,14 @@ export async function startServer(options = {}) {
           return json(res, 400, { error: "authorization_pending", error_description: "waiting for user authorization" });
         }
 
-        if (deviceSession.status === "authorized" && deviceSession.id_token) {
-          const result = { id_token: deviceSession.id_token, claims: deviceSession.claims };
-          // One-time retrieval — destroy session
-          await adapter.destroy("sessions", deviceCode);
-          return json(res, 200, result);
+        if (deviceSession.status === "authorized" && deviceSession.claims) {
+          // Mint a fresh id_token each time so the sandbox always gets a valid one.
+          // The device session stays alive — same sandbox can keep requesting tokens.
+          const freshIdToken = mintIdToken(issuer, jwksData, deviceSession.claims);
+          const freshClaims = JSON.parse(
+            Buffer.from(freshIdToken.split(".")[1], "base64url").toString("utf-8")
+          );
+          return json(res, 200, { id_token: freshIdToken, claims: freshClaims });
         }
 
         return json(res, 400, { error: "authorization_pending", error_description: "waiting for user authorization" });

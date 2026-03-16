@@ -52,15 +52,15 @@ Any AI agent proves who it is with a standard OIDC token (Google, Okta, Auth0, A
 | ⑤ | OpenCloak checks policy, returns a scoped Bearer token for Linear |
 | ⑥ | Agent calls Linear GraphQL API directly with the Bearer token |
 
-### After Setup (fully autonomous)
+### After Authorization (same sandbox)
 
-Once the human has signed in and connected their accounts, subsequent requests are **fully autonomous** — no browser, no human interaction:
+Once a human has authorized a device code, the device session persists for **24 hours**. The same sandbox can keep polling for fresh `id_token`s and exchanging them for scoped Bearer tokens — no re-authorization required:
 
 ```
 ┌──────────────┐  ①  ┌──────────────┐
-│   AI Agent   │────>│  OpenCloak   │  Vault sees registered agent +
-│  (headless   │     │  (the vault) │  connected accounts → auto-approves
-│   sandbox)   │<────│              │
+│   AI Agent   │────>│  OpenCloak   │  Same device_code → fresh id_token
+│  (same       │     │  (the vault) │  (minted on each poll, never expires
+│   sandbox)   │<────│              │   within the 24h session)
 └──────────────┘  ②  └──────────────┘
        │
        │  ③ Bearer token
@@ -71,7 +71,7 @@ Once the human has signed in and connected their accounts, subsequent requests a
 └──────────────┘
 ```
 
-The vault auto-approves device codes when a registered agent with connected accounts already exists. The agent gets a vault-minted `id_token` immediately — no polling, no waiting. The human only authorizes once.
+**New sandboxes always require human approval.** Each new `POST /device/code` starts as `pending` — a different sandbox could be malicious. The human-in-the-loop is the security guarantee (RFC 8628). The same sandbox making multiple requests does not need re-approval.
 
 The agent never sees your Linear OAuth credentials. It only gets back what OpenCloak's policy allows — a scoped, short-lived Bearer token.
 
@@ -154,7 +154,7 @@ curl -X POST http://localhost:3422/token \
 
 ## Device Flow for Headless Agents
 
-When an agent can't open a browser (sandboxed, headless, CI/CD), use the device flow. On the first run, a human signs in via the browser. **After setup, the vault auto-approves** and the agent gets tokens instantly with zero human interaction.
+When an agent can't open a browser (sandboxed, headless, CI/CD), use the device flow. A human signs in via the browser once per sandbox. After that, the sandbox can keep getting fresh tokens for 24 hours.
 
 ```javascript
 // 1. Agent requests a device code
@@ -207,17 +207,20 @@ await fetch("https://api.linear.app/graphql", {
     }`,
   }),
 });
+
+// 5. Later — same sandbox can re-poll for a fresh id_token (no re-auth)
+const freshPoll = await fetch(`https://vault.example.com/device/token?device_code=${device_code}`);
+const { id_token: freshIdToken } = await freshPoll.json();
+// Exchange again for a new Bearer token...
 ```
 
-## Running in Daytona
+## Running in E2B
 
-OpenCloak works with [Daytona](https://www.daytona.io/) sandboxes. The agent runs inside a headless sandbox, authenticates via the device flow, and gets scoped credentials — without any secrets in its environment.
-
-> **Heroku required for Daytona.** Daytona Tier 1/Tier 2 sandboxes restrict outbound network access to a fixed allowlist. `*.herokuapp.com` and `*.linear.app` are on that allowlist, so the agent can reach both the vault and Linear directly from the sandbox.
+OpenCloak works with [E2B](https://e2b.dev/) sandboxes. E2B provides full internet access by default, so agents can reach any vault and API endpoint. The agent runs inside a secure sandbox with zero credentials — it authenticates via the device flow and gets scoped tokens from OpenCloak.
 
 ```
 ┌─────────────────────────┐
-│     Daytona Sandbox     │
+│       E2B Sandbox       │
 │                         │
 │   ┌────────────┐        │       ┌────────────┐       ┌────────────┐
 │   │  OpenClaw  │───────────────>│  OpenCloak │──────>│   Google   │
@@ -238,30 +241,39 @@ OpenCloak works with [Daytona](https://www.daytona.io/) sandboxes. The agent run
 └─────────────────────────┘
 ```
 
-### Daytona Demos
+### E2B Demo
 
-**OpenClaw Agent Demo** — a real [OpenClaw](https://github.com/runnerelectrode/openclaw) agent runs inside the sandbox and autonomously reasons through the token exchange and Linear issue creation:
-
-```bash
-export DAYTONA_API_KEY=your_key
-export ANTHROPIC_API_KEY=your_key   # or OPENROUTER_API_KEY
-export HEROKU_API_KEY=your_heroku_key
-export LINEAR_TEAM_ID=your_team_id
-
-node examples/daytona/openclaw-demo.mjs
-```
-
-The script creates a Daytona sandbox, configures OpenClaw, runs the device flow, then prompts the OpenClaw agent with instructions to perform the RFC 8693 token exchange and create a Linear issue. The agent reasons through both steps autonomously — it never has Linear credentials in its environment.
-
-**Raw Script Demo** — same flow but using raw `fetch()` scripts instead of an agent:
+The demo creates an E2B sandbox with the `openclaw` template, runs the device flow (human approves once), then the [OpenClaw](https://github.com/runnerelectrode/openclaw) agent autonomously exchanges tokens and creates Linear issues:
 
 ```bash
-node examples/daytona/device-flow-demo.mjs
+node e2b-openclaw-demo.mjs
 ```
+
+The script:
+1. Creates an E2B sandbox with OpenClaw pre-installed
+2. Configures OpenRouter as the LLM provider (Sonnet 4.5 or DeepSeek V3)
+3. Agent requests a device code — **human signs in with Google**
+4. Agent polls, gets `id_token`, exchanges for Linear Bearer token (RFC 8693)
+5. Agent creates a Linear issue — zero credentials in its environment
+6. Sandbox stays alive — subsequent issues need no re-authorization
+
+Multiple sandboxes can run independently, each with their own device session and authorization.
+
+### E2B Agent Demo (raw)
+
+A raw demo without OpenClaw — uses DeepSeek V3 directly with tool calls:
+
+```bash
+node e2b-agent-demo.mjs
+```
+
+## Running in Daytona
+
+OpenCloak also works with [Daytona](https://www.daytona.io/) sandboxes. Note that Daytona Tier 1/2 restricts outbound network access — `*.herokuapp.com` and `*.linear.app` are on the allowlist.
 
 ## OpenClaw Skill
 
-OpenCloak ships with an [OpenClaw](https://github.com/runnerelectrode/openclaw) skill that teaches any agent how to authenticate via the device flow — no demo script needed.
+OpenCloak ships with an [OpenClaw](https://github.com/runnerelectrode/openclaw) skill that teaches any agent how to authenticate via the device flow.
 
 ### Install the skill
 
@@ -278,7 +290,7 @@ ln -s $(pwd)/skills/opencloak-auth ~/.openclaw/skills/opencloak-auth
 Set the vault URL and ask the agent to do something that requires API access:
 
 ```bash
-export OPENCLOAK_URL=https://your-vault.herokuapp.com
+export OPENCLOAK_URL=https://your-vault.example.com
 
 openclaw agent -m "Create a Linear issue titled 'Hello from OpenClaw' in team YOUR_TEAM_ID"
 ```
@@ -441,6 +453,9 @@ opencloak/
 ├── policy.mjs                          # Per-agent policy evaluation
 ├── heroku-start.mjs                    # Heroku startup with env-var seeding
 ├── Procfile                            # Heroku process definition
+├── e2b-openclaw-demo.mjs              # E2B + OpenClaw agent demo
+├── e2b-agent-demo.mjs                 # E2B + raw DeepSeek V3 agent demo
+├── e2b-demo.mjs                       # E2B + raw script demo
 ├── grants/
 │   └── token-exchange.mjs              # RFC 8693 token exchange handler
 ├── verifiers/
@@ -463,25 +478,22 @@ opencloak/
 ├── skills/
 │   └── opencloak-auth/
 │       └── SKILL.md                    # OpenClaw skill for device flow auth
-├── examples/
-│   └── daytona/
-│       ├── openclaw-demo.mjs           # OpenClaw agent demo (recommended)
-│       └── device-flow-demo.mjs        # Raw script demo
 ├── Dockerfile
 └── package.json
 ```
 
 ## Security Model
 
-- **Network isolation** — deploy behind a firewall, VPN, or reverse proxy
+- **Human-in-the-loop per sandbox** — every new `POST /device/code` starts as `pending`. A new sandbox could be malicious — each requires human approval via RFC 8628
+- **Persistent device sessions** — once a human approves, the device session persists for 24h. The same sandbox can keep getting fresh `id_token`s without re-authorization
+- **Fresh tokens on every poll** — the vault mints a new ES256-signed `id_token` on each `GET /device/token` poll, so the sandbox never holds an expired token
 - **No stored API keys** — only OAuth refresh tokens (revocable, scoped)
 - **Per-agent policy** — each agent gets independently scoped access
-- **Device codes** — 256-bit random, 10-minute expiry, one-time retrieval
+- **Device codes** — 256-bit random, 10-minute expiry for pending codes
 - **User codes** — no vowels (avoids offensive words), no ambiguous chars (0/O, 1/I/L)
 - **Polling rate enforcement** — server-side `slow_down` per RFC 8628
 - **PKCE + nonce** — all OIDC flows use PKCE and nonce validation
 - **JWKS origin validation** — prevents SSRF via discovery document
-- **Vault-minted id_tokens** — auto-approved device flows use vault-signed ES256 JWTs (not long-lived credentials)
 - **HTTPS enforced** — non-local OIDC endpoints must use HTTPS
 
 ## License
