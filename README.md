@@ -267,6 +267,51 @@ A raw demo without OpenClaw — uses DeepSeek V3 directly with tool calls:
 node e2b-agent-demo.mjs
 ```
 
+## Running in Blaxel
+
+OpenCloak works with [Blaxel](https://blaxel.ai/) sandboxes — perpetual microVMs that resume from standby in under 25ms. The agent runs in a `blaxel/node:latest` sandbox with zero credentials, authenticates via device flow, and gets scoped tokens from OpenCloak.
+
+```
+┌─────────────────────────┐
+│      Blaxel Sandbox     │
+│                         │
+│   ┌────────────┐        │       ┌────────────┐       ┌────────────┐
+│   │  OpenClaw  │───────────────>│  OpenCloak │──────>│   Google   │
+│   │  (agent)   │  POST /device/ │  (vault)   │ OIDC  │   (OIDC)   │
+│   │  Sonnet    │  code + token  │            │       └────────────┘
+│   │  4.5 via   │                │            │
+│   │  OpenRouter│  POST /token   │            │
+│   │            │  (id_token) ──>│            │
+│   │            │<── Bearer ─────│            │
+│   │            │    token       └────────────┘
+│   │            │
+│   │            │  POST graphql  ┌────────────┐
+│   │            │  Authorization:│   Linear   │
+│   │            │  Bearer ──────>│    API     │
+│   │            │<── issue ──────│            │
+│   └────────────┘   created      └────────────┘
+│                         │
+└─────────────────────────┘
+```
+
+### Blaxel Demo
+
+The demo creates a Blaxel sandbox, installs OpenClaw, runs the device flow (human approves once), then the OpenClaw agent autonomously exchanges tokens and creates Linear issues:
+
+```bash
+node blaxel-openclaw-demo.mjs
+```
+
+The script:
+1. Creates a Blaxel sandbox (`blaxel/node:latest`, 4GB RAM)
+2. Installs OpenClaw and configures OpenRouter (Sonnet 4.5)
+3. Agent requests a device code — **human signs in with Google**
+4. Agent polls, gets `id_token`, exchanges for Linear Bearer token (RFC 8693)
+5. OpenClaw agent creates a Linear issue — zero credentials in its environment
+6. Sandbox stays alive — subsequent issues need no re-authorization
+
+The sandbox auto-scales to zero after inactivity and resumes in <25ms, so it can be reused across sessions.
+
 ## Running in Daytona
 
 OpenCloak also works with [Daytona](https://www.daytona.io/) sandboxes. Note that Daytona Tier 1/2 restricts outbound network access — `*.herokuapp.com` and `*.linear.app` are on the allowlist.
@@ -453,6 +498,7 @@ opencloak/
 ├── policy.mjs                          # Per-agent policy evaluation
 ├── heroku-start.mjs                    # Heroku startup with env-var seeding
 ├── Procfile                            # Heroku process definition
+├── blaxel-openclaw-demo.mjs           # Blaxel + OpenClaw agent demo
 ├── e2b-openclaw-demo.mjs              # E2B + OpenClaw agent demo
 ├── e2b-agent-demo.mjs                 # E2B + raw DeepSeek V3 agent demo
 ├── e2b-demo.mjs                       # E2B + raw script demo

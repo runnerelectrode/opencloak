@@ -1,7 +1,7 @@
 import { Sandbox } from "e2b";
 
 const E2B_KEY = "e2b_6a3a93a3cdc027461665efb483e8c2499ca903eb";
-const OPENROUTER_KEY = "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";
+const OPENROUTER_KEY = "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";
 const VAULT = "https://id.opencloak.org";
 const TEAM_ID = "f6442499-53cb-4bf3-be79-5291905bc325";
 const STATE_ID = "419ad82d-e284-42a0-932f-e639af430278";
@@ -14,7 +14,7 @@ console.log("1. Creating E2B sandbox (openclaw template)...");
 const sandbox = await Sandbox.create("openclaw", {
   apiKey: E2B_KEY,
   envs: { OPENROUTER_API_KEY: OPENROUTER_KEY, OPENCLOAK_URL: VAULT },
-  timeoutMs: 600000,
+  timeoutMs: 3600000, // 1 hour
 });
 console.log(`   Sandbox: ${sandbox.sandboxId}\n`);
 

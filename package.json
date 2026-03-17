@@ -25,6 +25,9 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "@daytonaio/sdk": "^0.150.0"
+    "@blaxel/core": "^0.2.74",
+    "@daytonaio/sdk": "^0.150.0",
+    "@e2b/code-interpreter": "^2.3.3",
+    "e2b": "^2.14.1"
   }
 }
