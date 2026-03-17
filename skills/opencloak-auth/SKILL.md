@@ -1,7 +1,7 @@
 ---
 name: opencloak-auth
 description: You have NO API credentials. Before calling any third-party API (Linear, GitHub, Slack, etc.), you MUST use this skill to get a Bearer token from the OpenCloak vault via device flow. Never call an API without a token from OpenCloak first.
-metadata: {"openclaw":{"emoji":"🔐","primaryEnv":"OPENCLOAK_URL","requires":{"env":["OPENCLOAK_URL"]}}}
+metadata: {"openclaw":{"emoji":"🔐"}}
 user-invocable: true
 ---
 
@@ -11,16 +11,18 @@ user-invocable: true
 
 If you get a `401 Unauthorized`, `403 Forbidden`, or any authentication error from an API call, re-run this skill to get a fresh token. Tokens are short-lived and may have expired.
 
+## OpenCloak Vault URL
+
+The vault URL is: `https://id.opencloak.org`
+
+If the `OPENCLOAK_URL` environment variable is set, use that instead. Otherwise always use `https://id.opencloak.org`.
+
 ## When to use this skill
 
 - **ALWAYS** before calling any third-party API for the first time in a session
 - When you get a 401/403 from an API call (token expired — get a fresh one)
 - When the user asks you to interact with Linear, GitHub, Slack, or any OAuth-protected API
 - After context compaction — if you don't have a Bearer token in your current context, run this skill again
-
-## Environment
-
-- `OPENCLOAK_URL` — The URL of the OpenCloak vault (e.g., `https://opencloak-839b85b2946d.herokuapp.com`)
 
 ## Workflow
 
@@ -29,7 +31,8 @@ If you get a `401 Unauthorized`, `403 Forbidden`, or any authentication error fr
 Call the vault to start the device authorization flow:
 
 ```bash
-curl -s -X POST "${OPENCLOAK_URL}/device/code" \
+VAULT="${OPENCLOAK_URL:-https://id.opencloak.org}"
+curl -s -X POST "${VAULT}/device/code" \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -d "issuer_id=google"
 ```
@@ -45,7 +48,7 @@ To authorize me, please open this link and sign in with Google:
 
 {verification_uri_complete}
 
-If that link doesn't work, go to {OPENCLOAK_URL}/device/verify and enter code: {user_code}
+If that link doesn't work, go to https://id.opencloak.org/device/verify and enter code: {user_code}
 
 After signing in, you'll be asked to connect your provider account (e.g., Linear). Please complete that step too.
 
@@ -55,7 +58,7 @@ After showing the link, write a Node.js script to `/tmp/opencloak-poll.mjs` and 
 
 ```bash
 cat > /tmp/opencloak-poll.mjs << 'POLLSCRIPT'
-const VAULT = process.env.OPENCLOAK_URL;
+const VAULT = process.env.OPENCLOAK_URL || "https://id.opencloak.org";
 const DEVICE_CODE = process.argv[2];
 const RESOURCE = process.argv[3] || "https://api.linear.app";
 const SCOPE = process.argv[4] || "issues:create";
@@ -138,7 +141,7 @@ Common resource URIs and scopes:
 - **After context compaction** — you will lose the Bearer token from your context. This is expected. Just re-run this skill. The vault remembers the human's connected account — no re-authorization needed.
 - **Never hardcode or cache tokens** — always get a fresh one via this skill when needed.
 - You **never** see or store the underlying OAuth credentials.
-- If the token exchange fails with a policy error, the human may need to connect their account at `{OPENCLOAK_URL}/connect` first.
+- If the token exchange fails with a policy error, the human may need to connect their account at `https://id.opencloak.org/connect` first.
 - The device code expires after 10 minutes — if it expires, start over.
 - Each device code can only be used once.
 - **The human only needs to sign in once per device code.** After the first authorization, subsequent token exchanges reuse the same identity — the human does not need to re-authorize unless the device code expires.
@@ -151,5 +154,5 @@ Common resource URIs and scopes:
 | `slow_down` | Polling too fast | Increase interval to 10s |
 | `expired_token` | Device code expired (10 min) | Start over from Step 1 |
 | `no_matching_agent` | Agent identity not registered | Ask human to register agent on vault |
-| `no_connected_account` | No OAuth account connected | Direct human to `{OPENCLOAK_URL}/connect` |
+| `no_connected_account` | No OAuth account connected | Direct human to `https://id.opencloak.org/connect` |
 | `scope_not_allowed` | Policy blocks requested scope | Request fewer/different scopes |
