@@ -127,7 +127,7 @@ The agent gets a short-lived JWT, calls the gateway, and the gateway injects the
 | Step | RFC | What happens |
 |------|-----|-------------|
 | ① | [RFC 6750 §2.1](https://datatracker.ietf.org/doc/html/rfc6750#section-2.1) | Agent presents a JWT as `Authorization: Bearer <jwt>` to the gateway |
-| ② | [RFC 7517](https://datatracker.ietf.org/doc/html/rfc7517) | Gateway fetches the issuer's JWKS (cached with 5-min TTL, retry on unknown `kid`) |
+| ② | [RFC 7517](https://datatracker.ietf.org/doc/html/rfc7517) | Gateway fetches the issuer's public keys in JWKS format (RFC 7517), matches by `kid`, and uses the JWK to verify the JWT signature. Cached with 5-min TTL; retries on unknown `kid` to handle key rotation. |
 | ③ | [RFC 9068 §4](https://datatracker.ietf.org/doc/html/rfc9068#section-4) | Gateway verifies JWT signature (ES256), validates `aud`, `exp`, `scope`, `provider_id` |
 | ④ | — | Gateway looks up the provider's encrypted API key, injects it into the upstream request |
 | ⑤ | — | Upstream LLM response streams back through the gateway via SSE |
