@@ -3,11 +3,11 @@
 </p>
 
 <p align="center">
-  Open-source OAuth vault for AI agents. Built for <a href="https://github.com/runnerelectrode/openclaw">OpenClaw</a>.<br>
-  RFC 8693 token exchange · RFC 8628 device authorization · Pluggable OIDC identity.
+  Open-source OAuth vault and LLM gateway for AI agents. Built for <a href="https://github.com/runnerelectrode/openclaw">OpenClaw</a>.<br>
+  RFC 8693 token exchange · RFC 8628 device authorization · LLM credential gateway · Pluggable OIDC identity.
 </p>
 
-Any AI agent proves who it is with a standard OIDC token (Google, Okta, Auth0, Azure AD, or any compliant provider). OpenCloak checks policy and returns a scoped, short-lived access token for third-party APIs (Linear, GitHub, Google, Slack). Your agent never sees or stores long-lived credentials.
+Any AI agent proves who it is with a standard OIDC token (Google, Okta, Auth0, Azure AD, or any compliant provider). OpenCloak checks policy and returns a scoped, short-lived access token for third-party APIs (Linear, GitHub, Google, Slack) — or a gateway JWT for LLM APIs (Anthropic, OpenAI, OpenRouter). Your agent never sees or stores long-lived credentials.
 
 **Zero external dependencies.** Pure Node.js 18+.
 
@@ -74,6 +74,95 @@ Once a human has authorized a device code, the device session persists for **24 
 **New sandboxes always require human approval.** Each new `POST /device/code` starts as `pending` — a different sandbox could be malicious. The human-in-the-loop is the security guarantee (RFC 8628). The same sandbox making multiple requests does not need re-approval.
 
 The agent never sees your Linear OAuth credentials. It only gets back what OpenCloak's policy allows — a scoped, short-lived Bearer token.
+
+## LLM Gateway
+
+For LLM APIs (Anthropic, OpenAI, OpenRouter), OAuth token exchange doesn't work — these APIs use API keys, not Bearer tokens. If the vault returned the raw API key, the agent would have it in plaintext.
+
+The **LLM Gateway** (`gateway.opencloak.org`) solves this as a standalone reverse proxy. The agent gets a short-lived JWT, calls the gateway, and the gateway injects the real API key server-side. The agent never sees it.
+
+```
+┌──────────────┐  ①  ┌──────────────┐     ┌──────────────┐
+│   AI Agent   │────>│  OpenCloak   │────>│    Google     │
+│  (headless   │     │  Vault       │     │    (OIDC)     │
+│   sandbox)   │<────│              │     └──────────────┘
+└──────────────┘  ②  └──────────────┘
+       │              JWT with scope
+       │              "llm:openrouter"
+       │
+       │  ③ POST /v1/chat/completions
+       │     Authorization: Bearer <gateway_jwt>
+       ▼
+┌──────────────┐  ④  ┌──────────────┐
+│  OpenCloak   │────>│  OpenRouter  │
+│  Gateway     │     │  (upstream)  │
+│              │<────│              │
+│  Validates   │  ⑤  └──────────────┘
+│  JWT, injects│
+│  API key     │
+└──────────────┘
+```
+
+| Step | What happens |
+|------|-------------|
+| ① | Agent does device flow → gets `id_token` (same as OAuth flow) |
+| ② | Agent exchanges `id_token` at vault with `scope=llm:openrouter` → gets gateway JWT (15 min) |
+| ③ | Agent calls `POST gateway.opencloak.org/v1/chat/completions` with the JWT |
+| ④ | Gateway validates JWT via JWKS, injects the real API key, proxies to OpenRouter |
+| ⑤ | Response streams back through the gateway to the agent |
+
+### Why a Separate Gateway
+
+- **Standalone** — run just the LLM proxy without the full vault. Works with any OIDC issuer (Auth0, Okta, Keycloak)
+- **Independent scaling** — LLM proxy traffic (large streaming responses) ≠ auth traffic (small JSON)
+- **No shared secrets** — gateway validates JWTs via standard JWKS discovery, not shared keys
+- **API keys encrypted at rest** — AES-256-GCM via the shared adapter
+
+### Gateway Quick Start
+
+```bash
+# 1. Start the gateway
+node gateway/cli.mjs start --jwks-url https://id.opencloak.org/jwks --port 3423
+
+# 2. Register an LLM provider with your API key
+node gateway/cli.mjs llm add openrouter --api-key sk-or-v1-...
+node gateway/cli.mjs llm add anthropic --api-key sk-ant-...
+node gateway/cli.mjs llm add openai --api-key sk-...
+
+# 3. Register the provider stub on the vault (no API key needed)
+node cli.mjs add-provider openrouter --type llm
+
+# 4. Set policy
+node cli.mjs policy set user@example.com openrouter --scopes "llm:openrouter"
+```
+
+Then the agent exchanges for a gateway JWT and calls the LLM through the gateway:
+
+```bash
+# Exchange id_token for gateway JWT
+curl -X POST https://id.opencloak.org/token \
+  -d "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \
+  -d "actor_token=<id_token>" \
+  -d "actor_token_type=urn:ietf:params:oauth:token-type:id_token" \
+  -d "resource=https://gateway.opencloak.org" \
+  -d "scope=llm:openrouter"
+
+# Call LLM through gateway — API key injected server-side
+curl -X POST https://gateway.opencloak.org/v1/chat/completions \
+  -H "Authorization: Bearer <gateway_jwt>" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"anthropic/claude-sonnet-4","max_tokens":100,"messages":[{"role":"user","content":"Hi"}]}'
+```
+
+### Built-in Provider Presets
+
+| Provider | Upstream | Auth Header | Extras |
+|----------|----------|-------------|--------|
+| `anthropic` | `https://api.anthropic.com` | `x-api-key` | `anthropic-version: 2023-06-01` |
+| `openai` | `https://api.openai.com` | `Authorization: Bearer` | — |
+| `openrouter` | `https://openrouter.ai/api` | `Authorization: Bearer` | — |
+
+Custom providers are supported with `--upstream-url`, `--auth-header`, and `--auth-scheme`.
 
 ## Prerequisites
 
@@ -413,13 +502,59 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now opencloak
 ```
 
+### Gateway (VPS)
+
+```bash
+# Start the gateway alongside the vault
+node gateway/cli.mjs start \
+  --jwks-url https://id.opencloak.org/jwks \
+  --port 3423
+
+# Or with env vars
+OPENCLOAK_GATEWAY_JWKS_URL=https://id.opencloak.org/jwks \
+OPENCLOAK_GATEWAY_DATA_DIR=/var/lib/opencloak-gateway \
+OPENCLOAK_GATEWAY_URL=https://gateway.opencloak.org \
+OPENCLOAK_ENCRYPTION_KEY=<your-key> \
+node gateway/cli.mjs start
+```
+
+Run as a systemd service:
+
+```bash
+sudo tee /etc/systemd/system/opencloak-gateway.service > /dev/null <<'EOF'
+[Unit]
+Description=OpenCloak LLM Gateway
+After=network.target
+
+[Service]
+Type=simple
+User=opencloak
+WorkingDirectory=/opt/opencloak
+EnvironmentFile=/opt/opencloak-gateway.env
+ExecStart=/usr/bin/node gateway/cli.mjs start
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now opencloak-gateway
+```
+
 ### Local Dev
 
 ```bash
+# Vault
 node cli.mjs start --port 3422
+
+# Gateway (in another terminal)
+node gateway/cli.mjs llm add openrouter --api-key sk-or-v1-...
+node gateway/cli.mjs start --jwks-url http://localhost:3422/jwks --port 3423
 ```
 
-Data is stored in `~/.config/opencloak` by default.
+Data is stored in `~/.config/opencloak` (vault) and `~/.config/opencloak-gateway` (gateway) by default.
 
 ## Identity Providers
 
@@ -443,9 +578,11 @@ You can also set trusted issuers via `OPENCLOAK_TRUSTED_ISSUERS` env var (comma-
 
 ## API Endpoints
 
+### Vault (`id.opencloak.org`)
+
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/token` | POST | RFC 8693 token exchange |
+| `/token` | POST | RFC 8693 token exchange (OAuth + LLM) |
 | `/device/code` | POST | Start device authorization flow (RFC 8628) |
 | `/device/verify` | GET | Code entry page for human |
 | `/device/verify` | POST | Submit device code |
@@ -463,21 +600,44 @@ You can also set trusted issuers via `OPENCLOAK_TRUSTED_ISSUERS` env var (comma-
 | `/.well-known/openid-configuration` | GET | OIDC discovery metadata |
 | `/jwks` | GET | JSON Web Key Set |
 
+### Gateway (`gateway.opencloak.org`)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/*` | POST | Proxy to upstream LLM (e.g. `/v1/chat/completions`) |
+| `/*` | GET | Proxy to upstream LLM (e.g. `/v1/models`) |
+| `/health` | GET | Gateway health check |
+
 ## CLI Reference
+
+### Vault (`opencloak`)
 
 | Command | Description |
 |---------|-------------|
 | `start [--port 3422]` | Start the vault server |
 | `add-issuer <name> --issuer-url <url> [--audience <aud>]` | Register an OIDC identity provider |
 | `add-provider <name> --client-id X --client-secret Y` | Register an OAuth provider |
+| `add-provider <name> --type llm` | Register an LLM provider stub (API key lives on gateway) |
 | `register-agent --identity <sub>` | Register an agent by OIDC identity |
-| `policy set <identity> <provider> --scopes <scopes>` | Set agent permissions |
+| `policy set <identity> <provider> --scopes <scopes> [--allowed-models <m>]` | Set agent permissions |
 | `connect <provider> [--scopes "s1 s2"]` | Start OAuth consent flow |
 | `exchange --provider <name> --scope <scope>` | Manual token exchange (dev/testing) |
 | `list` | Show all registered entities |
 | `help` | Show usage information |
 
+### Gateway (`opencloak-gateway`)
+
+| Command | Description |
+|---------|-------------|
+| `start [--port 3423] [--jwks-url <url>]` | Start the gateway server |
+| `llm add <provider> --api-key <key>` | Register an LLM provider with API key |
+| `llm add custom --api-key <key> --upstream-url <url>` | Register a custom LLM provider |
+| `llm list` | List registered LLM providers |
+| `llm remove <provider>` | Remove an LLM provider |
+
 ## Environment Variables
+
+### Vault
 
 | Variable | Description |
 |----------|-------------|
@@ -488,22 +648,39 @@ You can also set trusted issuers via `OPENCLOAK_TRUSTED_ISSUERS` env var (comma-
 | `REGISTERED_AGENTS` | JSON array of agents to seed on startup (Heroku) |
 | `CONNECTED_ACCOUNTS` | JSON array of connected accounts to seed on startup (Heroku) |
 
+### Gateway
+
+| Variable | Description |
+|----------|-------------|
+| `OPENCLOAK_GATEWAY_JWKS_URL` | JWKS endpoint to fetch signing keys from (e.g. `https://id.opencloak.org/jwks`) |
+| `OPENCLOAK_GATEWAY_DATA_DIR` | Gateway data directory (default: `~/.config/opencloak-gateway`) |
+| `OPENCLOAK_GATEWAY_URL` | Public URL of the gateway (for JWT audience validation) |
+| `OPENCLOAK_ENCRYPTION_KEY` | AES-256 key for encrypting API keys at rest (shared with vault) |
+| `PORT` | Gateway listen port (default: `3423`) |
+
 ## Project Structure
 
 ```
 opencloak/
-├── server.mjs                          # HTTP server — all endpoints
-├── cli.mjs                             # CLI for vault management
-├── config.mjs                          # Configuration and adapter singleton
+├── server.mjs                          # Vault HTTP server — all endpoints
+├── cli.mjs                             # Vault CLI
+├── config.mjs                          # Vault configuration and adapter singleton
 ├── policy.mjs                          # Per-agent policy evaluation
 ├── heroku-start.mjs                    # Heroku startup with env-var seeding
 ├── Procfile                            # Heroku process definition
+├── gateway-sandbox-demo.mjs           # Blaxel sandbox + gateway demo
 ├── blaxel-openclaw-demo.mjs           # Blaxel + OpenClaw agent demo
 ├── e2b-openclaw-demo.mjs              # E2B + OpenClaw agent demo
 ├── e2b-agent-demo.mjs                 # E2B + raw DeepSeek V3 agent demo
 ├── e2b-demo.mjs                       # E2B + raw script demo
+├── gateway/                            # LLM credential gateway (standalone)
+│   ├── server.mjs                      # Gateway HTTP server
+│   ├── cli.mjs                         # Gateway CLI (start, llm add/list/remove)
+│   ├── proxy.mjs                       # JWT verification, API key injection, streaming
+│   ├── config.mjs                      # Gateway configuration and defaults
+│   └── audit.mjs                       # OCSF-aligned audit logging
 ├── grants/
-│   └── token-exchange.mjs              # RFC 8693 token exchange handler
+│   └── token-exchange.mjs              # RFC 8693 token exchange (OAuth + LLM branches)
 ├── verifiers/
 │   ├── oidc.mjs                        # OIDC token verification (JWKS)
 │   └── index.mjs                       # Verifier dispatcher
@@ -513,7 +690,7 @@ opencloak/
 │   └── generic-oauth.mjs              # Generic OAuth2 provider
 ├── adapters/
 │   ├── base.mjs                        # Storage adapter interface
-│   └── json-file.mjs                   # File-based storage (atomic writes)
+│   └── json-file.mjs                   # File-based storage (atomic writes, AES-256-GCM)
 ├── web/
 │   ├── index.html                      # Sign-in landing page
 │   ├── device.html                     # Device code entry page
@@ -533,14 +710,20 @@ opencloak/
 - **Human-in-the-loop per sandbox** — every new `POST /device/code` starts as `pending`. A new sandbox could be malicious — each requires human approval via RFC 8628
 - **Persistent device sessions** — once a human approves, the device session persists for 24h. The same sandbox can keep getting fresh `id_token`s without re-authorization
 - **Fresh tokens on every poll** — the vault mints a new ES256-signed `id_token` on each `GET /device/token` poll, so the sandbox never holds an expired token
-- **No stored API keys** — only OAuth refresh tokens (revocable, scoped)
-- **Per-agent policy** — each agent gets independently scoped access
+- **No stored API keys in agent environments** — OAuth refresh tokens are revocable and scoped; LLM API keys never leave the gateway
+- **API keys encrypted at rest** — AES-256-GCM encryption for all secrets (OAuth tokens, LLM API keys)
+- **Per-agent policy** — each agent gets independently scoped access, with optional model allowlists for LLM providers
+- **Gateway JWT audience scoping** — gateway JWTs include `aud` (gateway URL), `provider_id`, and `scope` claims; the gateway validates all three
+- **Short-lived gateway JWTs** — 15-minute expiry; agents re-exchange for fresh tokens
+- **JWKS-based verification** — gateway validates JWTs via standard JWKS discovery (no shared secrets between vault and gateway)
 - **Device codes** — 256-bit random, 10-minute expiry for pending codes
 - **User codes** — no vowels (avoids offensive words), no ambiguous chars (0/O, 1/I/L)
 - **Polling rate enforcement** — server-side `slow_down` per RFC 8628
 - **PKCE + nonce** — all OIDC flows use PKCE and nonce validation
 - **JWKS origin validation** — prevents SSRF via discovery document
-- **HTTPS enforced** — non-local OIDC endpoints must use HTTPS
+- **HTTPS enforced** — non-local OIDC endpoints and upstream LLM URLs must use HTTPS
+- **Request body size limit** — 1 MB max on proxied gateway requests
+- **Rate limiting** — per-IP rate limiter on both vault and gateway
 
 ## License
 
