@@ -79,43 +79,128 @@ The agent never sees your Linear OAuth credentials. It only gets back what OpenC
 
 For LLM APIs (Anthropic, OpenAI, OpenRouter), OAuth token exchange doesn't work — these APIs use API keys, not Bearer tokens. If the vault returned the raw API key, the agent would have it in plaintext.
 
-The **LLM Gateway** (`gateway.opencloak.org`) solves this as a standalone reverse proxy. The agent gets a short-lived JWT, calls the gateway, and the gateway injects the real API key server-side. The agent never sees it.
+The **LLM Gateway** (`gateway.opencloak.org`) solves this as a standalone reverse proxy built on three RFCs:
+
+- **[RFC 8693](https://datatracker.ietf.org/doc/html/rfc8693)** — Token Exchange: the agent exchanges an `id_token` for a gateway-scoped access token
+- **[RFC 9068](https://datatracker.ietf.org/doc/html/rfc9068)** — JWT Access Token Profile: the gateway JWT format (`typ: at+jwt`, ES256-signed, audience-scoped, 15-min expiry)
+- **[RFC 6750](https://datatracker.ietf.org/doc/html/rfc6750)** — Bearer Token Usage: how the agent presents the JWT to the gateway (`Authorization: Bearer <jwt>`)
+
+The agent gets a short-lived JWT, calls the gateway, and the gateway injects the real API key server-side. The agent never sees it.
+
+### Token Exchange Flow (RFC 8693 → RFC 9068 → RFC 6750)
 
 ```
-┌──────────────┐  ①  ┌──────────────┐     ┌──────────────┐
-│   AI Agent   │────>│  OpenCloak   │────>│    Google     │
-│  (headless   │     │  Vault       │     │    (OIDC)     │
-│   sandbox)   │<────│              │     └──────────────┘
-└──────────────┘  ②  └──────────────┘
-       │              JWT with scope
-       │              "llm:openrouter"
-       │
-       │  ③ POST /v1/chat/completions
-       │     Authorization: Bearer <gateway_jwt>
-       ▼
-┌──────────────┐  ④  ┌──────────────┐
-│  OpenCloak   │────>│  OpenRouter  │
-│  Gateway     │     │  (upstream)  │
-│              │<────│              │
-│  Validates   │  ⑤  └──────────────┘
-│  JWT, injects│
-│  API key     │
-└──────────────┘
+┌──────────────┐       ┌──────────────┐       ┌──────────────┐
+│   AI Agent   │       │  OpenCloak   │       │   OpenCloak  │
+│  (headless   │       │  Vault       │       │   Gateway    │
+│   sandbox)   │       │ id.opencloak │       │ gateway.open │
+└──────┬───────┘       └──────┬───────┘       └──────┬───────┘
+       │                      │                      │
+       │  ① POST /token       │                      │
+       │  grant_type=         │                      │
+       │   urn:ietf:params:   │                      │
+       │   oauth:grant-type:  │                      │
+       │   token-exchange     │                      │
+       │  actor_token=        │                      │
+       │   <id_token>         │                      │
+       │  resource=           │                      │
+       │   https://gateway.   │                      │
+       │   opencloak.org      │                      │
+       │  scope=              │                      │
+       │   llm:openrouter     │                      │
+       │─────────────────────>│                      │
+       │                      │                      │
+       │                      │  Verify id_token     │
+       │                      │  Look up agent       │
+       │                      │  Evaluate policy     │
+       │                      │  Mint JWT (RFC 9068) │
+       │                      │                      │
+       │  ② 200 OK            │                      │
+       │  {                   │                      │
+       │   access_token: jwt, │                      │
+       │   issued_token_type: │                      │
+       │    "urn:ietf:params: │                      │
+       │     oauth:token-     │                      │
+       │     type:jwt",       │                      │
+       │   token_type:        │                      │
+       │    "Bearer",         │                      │
+       │   expires_in: 900    │                      │
+       │  }                   │                      │
+       │<─────────────────────│                      │
+       │                      │                      │
+       │  ③ POST /v1/chat/completions                │
+       │  Authorization: Bearer <gateway_jwt>        │
+       │  (RFC 6750)                                 │
+       │─────────────────────────────────────────────>│
+       │                      │                      │
+       │                      │    ④ Fetch JWKS      │
+       │                      │<─────────────────────│
+       │                      │    GET /jwks          │
+       │                      │─────────────────────>│
+       │                      │                      │
+       │                      │  Verify JWT sig      │
+       │                      │  Check aud, exp,     │
+       │                      │   scope, provider_id │
+       │                      │                      │
+       │                      │    ⑤ Inject API key  │
+       │                      │    POST upstream     │
+       │                      │    x-api-key: sk-... │
+       │                      │              ┌───────┴───────┐
+       │                      │              │  OpenRouter   │
+       │                      │              │  (upstream)   │
+       │                      │              └───────┬───────┘
+       │                      │    ⑥ Stream response │
+       │  ⑦ SSE stream        │<─────────────────────│
+       │<─────────────────────────────────────────────│
+       │                      │                      │
 ```
 
-| Step | What happens |
-|------|-------------|
-| ① | Agent does device flow → gets `id_token` (same as OAuth flow) |
-| ② | Agent exchanges `id_token` at vault with `scope=llm:openrouter` → gets gateway JWT (15 min) |
-| ③ | Agent calls `POST gateway.opencloak.org/v1/chat/completions` with the JWT |
-| ④ | Gateway validates JWT via JWKS, injects the real API key, proxies to OpenRouter |
-| ⑤ | Response streams back through the gateway to the agent |
+| Step | RFC | What happens |
+|------|-----|-------------|
+| ① | [RFC 8693 §2.1](https://datatracker.ietf.org/doc/html/rfc8693#section-2.1) | Agent sends token exchange request with `actor_token` (id_token), `resource` (gateway URL), and `scope` (llm:openrouter) |
+| ② | [RFC 9068 §2](https://datatracker.ietf.org/doc/html/rfc9068#section-2) | Vault mints a JWT access token: `typ: at+jwt`, ES256-signed, `aud: https://gateway.opencloak.org`, `provider_id: openrouter`, 15-min expiry |
+| ③ | [RFC 6750 §2.1](https://datatracker.ietf.org/doc/html/rfc6750#section-2.1) | Agent presents the JWT as `Authorization: Bearer <jwt>` to the gateway |
+| ④ | [RFC 9068 §4](https://datatracker.ietf.org/doc/html/rfc9068#section-4) | Gateway fetches JWKS from the vault, verifies JWT signature (ES256), validates `aud`, `exp`, `scope`, `provider_id` |
+| ⑤ | — | Gateway looks up the provider's encrypted API key, injects it into the upstream request |
+| ⑥⑦ | — | Upstream LLM response streams back through the gateway via SSE |
+
+### Gateway JWT Claims (RFC 9068)
+
+The vault mints a JWT with these claims:
+
+```json
+{
+  "header": {
+    "alg": "ES256",
+    "typ": "at+jwt",
+    "kid": "0ad8c349-10a8-4d57-83cf-bca75ce5273d"
+  },
+  "payload": {
+    "iss": "https://id.opencloak.org",
+    "sub": "118306064515406679337",
+    "aud": "https://gateway.opencloak.org",
+    "exp": 1773973796,
+    "iat": 1773972896,
+    "jti": "739ffcf1-0a82-4909-bc7a-5f9216fe76e2",
+    "scope": "llm:openrouter",
+    "agent_id": "07f67617-41bc-4a6e-b3f8-2702f0138d2b",
+    "provider_id": "openrouter",
+    "email": "user@example.com"
+  }
+}
+```
+
+The gateway enforces:
+- **`aud`** must match the gateway's own URL
+- **`exp`** must not be in the past (with 30s clock skew tolerance)
+- **`provider_id`** determines which upstream and API key to use
+- **`allowed_models`** (optional) restricts which models the agent can call
 
 ### Why a Separate Gateway
 
-- **Standalone** — run just the LLM proxy without the full vault. Works with any OIDC issuer (Auth0, Okta, Keycloak)
+- **Standalone** — run just the LLM proxy without the full vault. Works with any OIDC issuer (Auth0, Okta, Keycloak) that exposes a JWKS endpoint
 - **Independent scaling** — LLM proxy traffic (large streaming responses) ≠ auth traffic (small JSON)
-- **No shared secrets** — gateway validates JWTs via standard JWKS discovery, not shared keys
+- **No shared secrets** — gateway validates JWTs via standard JWKS discovery ([RFC 7517](https://datatracker.ietf.org/doc/html/rfc7517)), not shared keys
 - **API keys encrypted at rest** — AES-256-GCM via the shared adapter
 
 ### Gateway Quick Start
@@ -139,7 +224,7 @@ node cli.mjs policy set user@example.com openrouter --scopes "llm:openrouter"
 Then the agent exchanges for a gateway JWT and calls the LLM through the gateway:
 
 ```bash
-# Exchange id_token for gateway JWT
+# Step 1: Exchange id_token for gateway JWT (RFC 8693 → RFC 9068)
 curl -X POST https://id.opencloak.org/token \
   -d "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \
   -d "actor_token=<id_token>" \
@@ -147,11 +232,23 @@ curl -X POST https://id.opencloak.org/token \
   -d "resource=https://gateway.opencloak.org" \
   -d "scope=llm:openrouter"
 
-# Call LLM through gateway — API key injected server-side
+# Response:
+# {
+#   "access_token": "<ES256-signed JWT>",
+#   "issued_token_type": "urn:ietf:params:oauth:token-type:jwt",
+#   "token_type": "Bearer",
+#   "expires_in": 900,
+#   "scope": "llm:openrouter"
+# }
+
+# Step 2: Call LLM through gateway (RFC 6750 Bearer token presentation)
 curl -X POST https://gateway.opencloak.org/v1/chat/completions \
   -H "Authorization: Bearer <gateway_jwt>" \
   -H "Content-Type: application/json" \
   -d '{"model":"anthropic/claude-sonnet-4","max_tokens":100,"messages":[{"role":"user","content":"Hi"}]}'
+
+# The gateway validates the JWT, injects the real API key, and proxies to OpenRouter.
+# The agent never sees sk-or-v1-...
 ```
 
 ### Built-in Provider Presets
