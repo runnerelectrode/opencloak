@@ -51,9 +51,24 @@ async function addProvider(opts) {
   const name = opts._positional[0];
   if (!name) {
     console.error("Usage: opencloak add-provider <name> --client-id X --client-secret Y");
+    console.error("       opencloak add-provider <name> --type llm");
     process.exit(1);
   }
 
+  // --- LLM provider: minimal stub (no OAuth credentials) ---
+  if (opts.type === "llm") {
+    const providerData = {
+      name,
+      type: "llm",
+      created_at: new Date().toISOString(),
+    };
+    await adapter.upsert("providers", name, providerData);
+    console.log(`LLM provider '${name}' registered (id: ${name})`);
+    console.log(`  Configure the actual API key on the gateway: opencloak-gateway llm add ${name} --api-key <key>`);
+    return;
+  }
+
+  // --- OAuth provider ---
   if (!opts["client-id"] || !opts["client-secret"]) {
     console.error("--client-id and --client-secret are required");
     process.exit(1);
@@ -224,17 +239,26 @@ async function policyCmd(opts) {
   const scopeList = scopes.split(",").map((s) => s.trim());
   const policyId = `${agent.id}:${providerId}`;
 
-  await adapter.upsert("policies", policyId, {
+  const policyData = {
     agent_id: agent.id,
     provider_id: providerId,
     allowed_scopes: scopeList,
     created_at: new Date().toISOString(),
-  });
+  };
+
+  if (opts["allowed-models"]) {
+    policyData.allowed_models = opts["allowed-models"].split(",").map((s) => s.trim());
+  }
+
+  await adapter.upsert("policies", policyId, policyData);
 
   console.log(`Policy set:`);
   console.log(`  agent:    ${identity} (${agent.id})`);
   console.log(`  provider: ${providerId}`);
   console.log(`  scopes:   ${scopeList.join(", ")}`);
+  if (policyData.allowed_models) {
+    console.log(`  models:   ${policyData.allowed_models.join(", ")}`);
+  }
 }
 
 async function connect(opts) {
@@ -420,8 +444,10 @@ Commands:
                                                    Register an OIDC identity provider
   add-provider <name> --client-id X --client-secret Y
                                                    Register an OAuth provider
+  add-provider <name> --type llm                   Register an LLM provider stub (API key on gateway)
   register-agent --identity <email-or-sub>         Register an agent by OIDC identity
-  policy set <identity> <provider> --scopes <s>    Set agent permissions
+  policy set <identity> <provider> --scopes <s> [--allowed-models <m>]
+                                                   Set agent permissions
   connect <provider> [--scopes "s1 s2"]            Start OAuth consent flow
   exchange --provider <name> --scope <scope>       Manual token exchange (dev)
   list                                             Show all registered entities

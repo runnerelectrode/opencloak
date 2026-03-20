@@ -12,13 +12,16 @@
  * @param {string} agentId  - agent ID (looked up by OIDC sub claim)
  * @param {string} providerId - target provider ID
  * @param {string[]} requestedScopes - scopes the agent is requesting
- * @returns {{ allowed: boolean, scopes: string[], error?: string, account?: object }}
+ * @param {object} [options] - additional options
+ * @param {string} [options.providerType] - "llm" to skip account lookup
+ * @returns {{ allowed: boolean, scopes: string[], error?: string, account?: object, allowed_models?: string[] }}
  */
 export async function evaluatePolicy(
   adapter,
   agentId,
   providerId,
-  requestedScopes
+  requestedScopes,
+  options = {}
 ) {
   // 1. Find agent
   const agent = await adapter.find("agents", agentId);
@@ -33,14 +36,18 @@ export async function evaluatePolicy(
   }
 
   // 3. Find owner's connected account for this provider
-  const accounts = await adapter.findBy("accounts", "owner_id", owner.id);
-  const account = accounts.find((a) => a.provider_id === providerId);
-  if (!account) {
-    return {
-      allowed: false,
-      scopes: [],
-      error: `owner has no connected account for provider '${providerId}'`,
-    };
+  //    LLM providers have no connected accounts — skip this step.
+  let account = null;
+  if (options.providerType !== "llm") {
+    const accounts = await adapter.findBy("accounts", "owner_id", owner.id);
+    account = accounts.find((a) => a.provider_id === providerId);
+    if (!account) {
+      return {
+        allowed: false,
+        scopes: [],
+        error: `owner has no connected account for provider '${providerId}'`,
+      };
+    }
   }
 
   // 4. Find agent policy for this provider
@@ -67,12 +74,15 @@ export async function evaluatePolicy(
     };
   }
 
+  const result = { allowed: true, scopes: granted };
+  if (account) result.account = account;
+  if (policy.allowed_models) result.allowed_models = policy.allowed_models;
   if (denied.length > 0) {
-    // Partial grant — return only the intersection
-    return { allowed: true, scopes: granted, account, partial: true, denied };
+    result.partial = true;
+    result.denied = denied;
   }
 
-  return { allowed: true, scopes: granted, account };
+  return result;
 }
 
 /**

@@ -23,6 +23,7 @@ const SECRET_FIELDS = new Set([
   "client_secret",
   "access_token",
   "refresh_token",
+  "api_key",
 ]);
 
 // Regex for safe IDs: alphanumeric, hyphens, underscores, dots, colons, @

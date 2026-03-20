@@ -388,7 +388,7 @@ export async function startServer(options = {}) {
           });
         }
 
-        const result = await handleTokenExchange(body, adapter);
+        const result = await handleTokenExchange(body, adapter, issuer, jwksData);
         return json(res, result.status, result.body);
       }
 
